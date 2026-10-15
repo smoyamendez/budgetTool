@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local testing with `npm run dev`. Never commit .dev.vars.
+APP_PASSWORD=pick-a-long-password
+# Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+TOKEN_ENCRYPTION_KEY=
+PLAID_CLIENT_ID=
+PLAID_SECRET=
+PLAID_REDIRECT_URI=

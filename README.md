@@ -2,7 +2,16 @@
 
 A personal budget app built around your pay cycle instead of the calendar month. Every bill is assigned to the paycheck that pays it. Debt payoff comes next, and the totals use what you actually paid. Bank and card transactions come in through Plaid, or from a CSV file your bank lets you download.
 
-It runs on your own computer. Your Plaid keys, bank connections and budget never leave it, except for the calls Payday makes to Plaid.
+- **App:** plain HTML in `public/`, hosted free on GitHub Pages. Add it to your phone's home screen and it opens like an app.
+- **Backend:** a Cloudflare Worker in `worker/`, with your data in a Cloudflare D1 database. Free tier, always on.
+- **Banks:** Plaid, called only from the Worker so your Plaid secret never reaches the browser.
+
+```
+Phone / laptop  ──►  GitHub Pages (the app)
+       │
+       └── API calls with your sign-in ──►  Cloudflare Worker  ──►  D1 database
+                                                   └──────────────►  Plaid
+```
 
 ## What it does
 
@@ -11,85 +20,158 @@ It runs on your own computer. Your Plaid keys, bank connections and budget never
 - **Static and variable bills.** Variable bills use an estimate until you enter the real amount.
 - **Real amounts.** When you mark a bill paid you record what you actually paid. Monthly totals compare paid against planned.
 - **Bank matching.** Plaid transactions and imported CSV payments are matched to bills. Review the matches and link them in one tap. When a pending charge posts, its link follows it.
+- **Daily sync.** The Worker pulls new transactions every morning, and again whenever you open the app.
 - **Debt payoff plan.** Pay the highest interest first or the smallest balance first, with a debt-free date.
 
-## Setup
+## Set it up
 
-You need [Node.js](https://nodejs.org) 20 or newer.
+You'll do this once, on a computer. You need [Node.js](https://nodejs.org) 20 or newer, a free [Cloudflare](https://dash.cloudflare.com/sign-up) account, and a free [Plaid](https://dashboard.plaid.com) account.
+
+### 1. Get the code
 
 ```bash
 git clone https://github.com/smoyamendez/budgetTool.git
 cd budgetTool
 npm install
-cp .env.example .env
-npm start
+npx wrangler login
 ```
 
-Open http://localhost:3000. The app works without Plaid; you can add bills and import CSV files right away.
+`wrangler login` opens your browser so you can allow access to your Cloudflare account.
 
-### Connect Plaid
+### 2. Create the database
 
-1. Create a free account at [dashboard.plaid.com](https://dashboard.plaid.com).
-2. Go to **Developers → Keys** and copy your `client_id` and your **Sandbox** secret.
-3. Put them in `.env`:
-   ```
-   PLAID_CLIENT_ID=your_client_id
-   PLAID_SECRET=your_sandbox_secret
-   PLAID_ENV=sandbox
-   ```
-4. Restart the server (`npm start`), open **Settings → Connect a bank or card**.
-5. In Sandbox, pick any test bank and sign in with `user_good` / `pass_good`.
+```bash
+npx wrangler d1 create payday
+```
 
-### Use your real accounts
+It prints a `database_id`. Open `wrangler.toml` and replace `REPLACE_WITH_YOUR_D1_DATABASE_ID` with it. Then create the tables:
 
-Sandbox only has fake banks. To connect your real accounts, request Production access in the Plaid dashboard, then switch `.env` to your Production secret and set `PLAID_ENV=production`. Check Plaid's current pricing and approval steps in the dashboard before you do.
+```bash
+npm run db:migrate
+```
 
-Some banks sign you in on their own website (OAuth). Those need a redirect URI registered in the Plaid dashboard and set as `PLAID_REDIRECT_URI` in `.env`. See [Plaid's OAuth guide](https://plaid.com/docs/link/oauth/) for what each environment accepts.
+### 3. Add your secrets
 
-## Your data
+Each command asks you to paste a value. Secrets are stored encrypted by Cloudflare and never go in the code.
 
-Everything is saved as JSON in the `data/` folder (or wherever `DATA_DIR` points):
+```bash
+npx wrangler secret put APP_PASSWORD
+npx wrangler secret put TOKEN_ENCRYPTION_KEY
+npx wrangler secret put PLAID_CLIENT_ID
+npx wrangler secret put PLAID_SECRET
+```
 
-| File | What's in it |
-| --- | --- |
-| `budget.json` | Pay schedule, bills, debts, what you paid |
-| `transactions.json` | Payments from Plaid and CSV imports, grouped by month |
-| `plaid.json` | Your bank connections, including Plaid access tokens. Treat it like a password. |
+- **APP_PASSWORD** is what you'll type to sign in. Use something long.
+- **TOKEN_ENCRYPTION_KEY** encrypts your bank connections in the database. Make one with:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+  ```
+  Save a copy somewhere safe, like a password manager. If it's lost or changed, you'll have to reconnect your banks.
+- **PLAID_CLIENT_ID** and **PLAID_SECRET** come from the Plaid dashboard under **Developers → Keys**. Start with the Sandbox secret.
 
-`data/` and `.env` are in `.gitignore`, so they never get committed. Back up `data/` if you want to keep your history.
+If wrangler asks whether to create the Worker first, say yes.
 
-The server only listens on `127.0.0.1`, so other devices on your network can't reach it, and it rejects write requests that come from other websites.
+### 4. Deploy the backend
+
+```bash
+npm run deploy
+```
+
+It prints your Worker's address, something like `https://payday-api.yourname.workers.dev`. Copy it.
+
+### 5. Publish the app on GitHub Pages
+
+In this repo on GitHub:
+
+1. **Settings → Pages.** Under "Build and deployment", set Source to **GitHub Actions**.
+2. **Settings → Secrets and variables → Actions → Variables tab → New repository variable.** Name it `PAYDAY_API_URL` and paste your Worker address.
+3. Commit the `wrangler.toml` change from step 2 and push to `main`.
+
+The "Deploy app to GitHub Pages" action runs and publishes the app at **https://smoyamendez.github.io/budgetTool/**.
+
+### 6. Put it on your phone
+
+Open that address in Safari (iPhone) or Chrome (Android) and sign in. Then:
+
+- **iPhone:** tap Share, then **Add to Home Screen**.
+- **Android:** tap the menu, then **Add to Home screen** or **Install app**.
+
+## Plaid
+
+**Testing.** With `PLAID_ENV = "sandbox"` in `wrangler.toml`, go to **Settings → Connect a bank or card**, pick any bank and sign in with `user_good` / `pass_good`.
+
+**Your real accounts.** Apply for Plaid's free Trial plan from the dashboard home page (or dashboard.plaid.com/trial-plan). Once approved:
+
+```bash
+npx wrangler secret put PLAID_SECRET     # paste your Production secret
+```
+
+Then set `PLAID_ENV = "production"` in `wrangler.toml` and deploy again. The Trial plan allows 10 bank connections in total, and removing one doesn't give the slot back. If a connection breaks, use **Sign in again** instead of removing it.
+
+**Banks that sign in on their own website (OAuth),** like Chase. In the Plaid dashboard go to **Developers → API → Allowed redirect URIs** and add `https://smoyamendez.github.io/budgetTool/`. Then:
+
+```bash
+npx wrangler secret put PLAID_REDIRECT_URI   # https://smoyamendez.github.io/budgetTool/
+```
+
+## Automatic deploys (optional)
+
+The "Deploy backend to Cloudflare" action deploys the Worker whenever you push changes to `worker/`, `migrations/` or `wrangler.toml` to `main`. It skips itself until you add two repository **secrets** under Settings → Secrets and variables → Actions:
+
+- `CLOUDFLARE_ACCOUNT_ID`: in the Cloudflare dashboard, on the Workers & Pages overview page.
+- `CLOUDFLARE_API_TOKEN`: Cloudflare dashboard → My Profile → API Tokens → Create Token. Start from the **Edit Cloudflare Workers** template and add **Account → D1 → Edit**.
+
+## Security
+
+- Every API call needs a sign-in. The Worker keeps only a hash of each session token, and sessions last 60 days.
+- Five wrong passwords from one network, or 20 overall, lock sign-in for 15 minutes.
+- Plaid access tokens are encrypted with AES-GCM before they're stored.
+- The API only accepts requests from the websites listed in `ALLOWED_ORIGINS` in `wrangler.toml`.
+- **Settings → Sign out on all devices** ends every session if you lose a phone.
+- Your sign-in token is kept in the browser's local storage on each device you use.
+
+## Work on it locally
+
+```bash
+cp .dev.vars.example .dev.vars     # fill in a password, key and Plaid sandbox keys
+npm run db:migrate:local
+npm run dev
+```
+
+Open http://localhost:8787. The Worker serves the app itself, so no separate web server is needed.
 
 ## Project layout
 
 ```
-public/index.html      The app (plain HTML, CSS and JavaScript, no build step)
-server/src/index.ts    Express server: budget, transactions and Plaid routes
-server/src/plaid.ts    Plaid Link tokens, token exchange, /transactions/sync
-server/src/store.ts    JSON file storage with safe writes
+public/                The app: index.html, config.js, manifest and icons
+worker/src/index.ts    Routes, CORS and the daily sync
+worker/src/auth.ts     Sign-in, sessions, rate limiting
+worker/src/plaid.ts    Plaid Link, token exchange, /transactions/sync
+worker/src/store.ts    D1 reads and writes
+worker/src/crypto.ts   Hashing and token encryption
+migrations/            Database tables
+.github/workflows/     GitHub Pages and Cloudflare deploys
 ```
 
 ### API
 
+All routes except `/api/login` need `Authorization: Bearer <token>`.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
+| POST | `/api/login` | Sign in with `{ password }`, returns `{ token }` |
+| POST | `/api/logout`, `/api/logout-everywhere` | Sign out this device, or all of them |
 | GET / PUT | `/api/state` | Read or save the whole budget |
 | GET | `/api/transactions` | All payments, grouped by month |
-| PUT / DELETE | `/api/transactions/month/:YYYY-MM` | Replace or clear one month (used by CSV import) |
+| PUT / DELETE | `/api/transactions/month/:YYYY-MM` | Add imported payments to a month, or clear it |
 | GET | `/api/plaid/status` | Whether Plaid is set up, and your connections |
 | POST | `/api/plaid/link-token` | Start Plaid Link (send `item_id` to fix a broken sign-in) |
 | POST | `/api/plaid/exchange` | Save a new connection and run the first sync |
 | POST | `/api/plaid/sync` | Pull new, changed and removed transactions |
 | DELETE | `/api/plaid/items/:id` | Remove a connection |
 
-## Scripts
-
-- `npm start` runs the server.
-- `npm run dev` runs it and restarts when you change server code.
-- `npm run typecheck` checks the TypeScript.
-
 ## Ideas for next
 
 - Fill in credit card balances, APRs and minimums from Plaid Liabilities.
 - Learn each variable bill's estimate from the last few months of real amounts.
-- A small "move my data over" import for the earlier prototype.
+- Work offline on the phone and catch up when back online.

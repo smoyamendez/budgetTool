@@ -6,6 +6,14 @@
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <title>Payday</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Payday">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<script src="config.js"></script>
 <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 <style>
 html, body { margin: 0; }
@@ -163,6 +171,9 @@ button.row:active { background: var(--surface-2); }
 .sheet-bar button:first-child { text-align: left; }
 .actions { display: flex; flex-direction: column; gap: var(--space-2); }
 
+.login { min-height: 70vh; display: flex; flex-direction: column; justify-content: center; gap: var(--space-6); }
+.login form { display: flex; flex-direction: column; gap: var(--space-3); }
+.login .err { color: var(--late); font-size: 15px; line-height: 20px; min-height: 20px; }
 .toast { position: fixed; left: 50%; bottom: calc(92px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: var(--space-2) var(--space-4); border-radius: var(--radius-pill); font-size: 15px; z-index: 30; max-width: calc(100% - 32px); }
 </style>
 
@@ -516,7 +527,7 @@ button.row:active { background: var(--surface-2); }
   function badge(st, text) { return '<span class="badge ' + st + '">' + esc(text || LABEL[st] || '') + '</span>'; }
   function banners() {
     var h = '';
-    if (!storeOk) h += '<div class="banner warn"><p>Can\'t reach the Payday server, so changes won\'t be saved. Start it with npm start, then reload this page.</p></div>';
+    if (!storeOk) h += '<div class="banner warn"><p>Can\'t reach your Payday backend, so changes won\'t be saved. Check your connection.</p><button data-act="retry">Try again</button></div>';
     if (state.settings.examples) h += '<div class="banner"><p>These are example bills and debts. Edit them to match yours, or clear them and start fresh.</p><button data-act="clear-examples">Clear examples</button></div>';
     return h;
   }
@@ -692,14 +703,44 @@ button.row:active { background: var(--surface-2); }
       '<div class="section-foot">Spending money is what you keep set aside each paycheck for groceries, gas and the rest. Payday only suggests extra debt payments from what\'s left after that.</div>' +
       '<button class="btn tinted block" type="submit">Save pay schedule</button></form>' +
       plaidSection() + bankSection() +
+      '<div class="section"><div class="section-label">Account</div><div class="list"><button class="row plain" data-act="sign-out"><span class="row-main" style="color:var(--accent)">Sign out</span></button><button class="row plain" data-act="sign-out-all"><span class="row-main" style="color:var(--accent)">Sign out on all devices</span></button></div></div>' +
       '<div class="section"><div class="section-label">Data</div><div class="list"><button class="row plain" data-act="reset-all"><span class="row-main" style="color:var(--late)">Erase everything and start over</span></button></div></div>';
   }
   // ---------- server + Plaid ----------
   var plaid = { loaded: false, configured: false, env: '', items: [], busy: false };
+  var API = String(window.PAYDAY_API || '').replace(/\/+$/, '');
+  var TOKEN_KEY = 'payday.token', memToken = null;
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY) || memToken; } catch (e) { return memToken; } }
+  function setToken(t) { memToken = t; try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
   function api(method, url, body) {
-    return fetch(url, { method: method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined })
-      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || 'The server returned an error.'); return j; }); });
+    var headers = {}, token = getToken();
+    if (body) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = 'Bearer ' + token;
+    return fetch(API + url, { method: method, headers: headers, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (r.status === 401 && url !== '/api/login') { setToken(null); showLogin(j.error); var e1 = new Error(j.error || 'Please sign in.'); e1.signedOut = true; throw e1; }
+          if (!r.ok) { var e2 = new Error(j.error || 'The server returned an error.'); e2.status = r.status; throw e2; }
+          return j;
+        });
+      });
   }
+  function showLogin(msg) {
+    state = null; clearTimeout(saveTimer); saveTimer = null; closeSheet();
+    document.querySelector('.tabbar').hidden = true;
+    document.getElementById('app').innerHTML = '<div class="login"><div class="head"><h1 class="large-title">Payday</h1><div class="sub muted">Every bill has a paycheck.</div></div>' +
+      '<form id="login-form"><div class="list"><div class="field"><label for="login-pw">Password</label><input id="login-pw" name="password" type="password" autocomplete="current-password" required></div></div>' +
+      '<div class="err" id="login-err" role="alert">' + esc(msg && msg !== 'Please sign in.' ? msg : '') + '</div>' +
+      '<button class="btn filled block" type="submit">Sign in</button></form></div>';
+    setTimeout(function () { var el = document.getElementById('login-pw'); if (el) el.focus(); }, 50);
+  }
+  function doLogin(form) {
+    var pw = form.password.value, err = document.getElementById('login-err'), btn = form.querySelector('button');
+    btn.disabled = true; err.textContent = '';
+    api('POST', '/api/login', { password: pw }).then(function (j) { setToken(j.token); document.querySelector('.tabbar').hidden = false; start(); })
+      .catch(function (e) { btn.disabled = false; err.textContent = e.message || "Couldn't sign in."; });
+  }
+  function signOut() { flushSave().catch(function () {}).then(function () { return api('POST', '/api/logout').catch(function () {}); }).then(function () { setToken(null); showLogin(); }); }
   function loadState() { return api('GET', '/api/state').then(function (j) { state = normalize(j.state); }); }
   function loadTxns() { return api('GET', '/api/transactions').then(function (j) { txnDocs = j.months || {}; rebuildTxns(); }); }
   function loadPlaid() { return api('GET', '/api/plaid/status').then(function (j) { plaid.loaded = true; plaid.configured = j.configured; plaid.env = j.env; plaid.items = j.items || []; }); }
@@ -720,13 +761,31 @@ button.row:active { background: var(--surface-2); }
     plaid.busy = true; if (!quiet && !sheetOpen()) render();
     return flushSave().then(function () { return api('POST', '/api/plaid/sync'); }).then(function (r) { return afterSync(r); }).catch(plaidFail);
   }
+  var LINK_KEY = 'payday.linkToken';
   function openLink(itemId) {
     if (!window.Plaid) { toast("Couldn't load Plaid. Check your internet connection and reload."); return; }
     plaid.busy = true; render();
     api('POST', '/api/plaid/link-token', itemId ? { item_id: itemId } : {}).then(function (r) {
-      var handler = window.Plaid.create({
-        token: r.link_token,
+      try { sessionStorage.setItem(LINK_KEY, JSON.stringify({ token: r.link_token, itemId: itemId || null })); } catch (e) {}
+      linkHandler(r.link_token, itemId).open();
+    }).catch(plaidFail);
+  }
+  // Banks that sign in on their own website send you back here with ?oauth_state_id=...
+  function resumeOAuth() {
+    if (!/[?&]oauth_state_id=/.test(location.search) || !window.Plaid) return;
+    var saved = null; try { saved = JSON.parse(sessionStorage.getItem(LINK_KEY) || 'null'); } catch (e) {}
+    var here = location.href;
+    history.replaceState(null, '', location.pathname);
+    if (!saved) { toast('Plaid sign-in was interrupted. Tap Connect a bank or card to try again.'); return; }
+    plaid.busy = true; tab = 'settings'; render();
+    linkHandler(saved.token, saved.itemId, here).open();
+  }
+  function linkHandler(linkToken, itemId, redirectUri) {
+      return window.Plaid.create({
+        token: linkToken,
+        receivedRedirectUri: redirectUri,
         onSuccess: function (publicToken, meta) {
+          try { sessionStorage.removeItem(LINK_KEY); } catch (e) {}
           if (itemId) { toast('Signed back in. Syncing now.'); syncNow(); return; }
           toast('Connected. Pulling your transactions.');
           flushSave().then(function () { return api('POST', '/api/plaid/exchange', { public_token: publicToken, institution_name: meta && meta.institution ? meta.institution.name : undefined }); })
@@ -734,20 +793,18 @@ button.row:active { background: var(--surface-2); }
         },
         onExit: function (err) { plaid.busy = false; render(); if (err) toast(err.display_message || err.error_message || 'Plaid closed before finishing.'); }
       });
-      handler.open();
-    }).catch(plaidFail);
   }
   function plaidSection() {
     var h = '<div class="section"><div class="section-label">Connected banks and cards</div>';
     if (!plaid.loaded) return h + '<div class="list"><div class="empty">' + (storeOk ? 'Checking connections' : 'Start the Payday server to connect banks.') + '</div></div></div>';
-    if (!plaid.configured) return h + '<div class="card"><div class="headline">Set up Plaid</div><div class="sub muted">Add your Plaid client ID and secret to the .env file in the project folder, then restart the server. The README walks through it.</div><button class="btn" disabled>Connect a bank or card</button></div></div>';
+    if (!plaid.configured) return h + '<div class="card"><div class="headline">Set up Plaid</div><div class="sub muted">Add your Plaid client ID and secret as Cloudflare Worker secrets, then reload. The README walks through it.</div><button class="btn" disabled>Connect a bank or card</button></div></div>';
     if (plaid.items.length) h += '<div class="list">' + plaid.items.map(function (i) {
       var sub = (i.accounts && i.accounts.length ? i.accounts.join(', ') + ' · ' : '') + (i.error ? 'Needs you to sign in again' : i.last_synced ? 'Synced ' + fmtStamp(i.last_synced) : 'Not synced yet');
       return '<button class="row plain" data-act="plaid-item" data-id="' + esc(i.item_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(i.institution_name) + '</span><span class="sub muted" style="display:block">' + esc(sub) + '</span></span>' + (i.error ? badge('late', 'Fix') : '') + I.chev + '</button>';
     }).join('') + '</div>';
     h += '<div class="actions"><button class="btn filled" data-act="plaid-connect"' + (plaid.busy ? ' disabled' : '') + '>Connect a bank or card</button>' +
       (plaid.items.length ? '<button class="btn tinted" data-act="plaid-sync"' + (plaid.busy ? ' disabled' : '') + '>' + (plaid.busy ? 'Syncing' : 'Sync now') + '</button>' : '') + '</div>';
-    h += '<div class="section-foot">' + (plaid.env === 'sandbox' ? 'Sandbox mode uses fake banks for testing. Sign in with user_good and pass_good. Set PLAID_ENV=production in .env to connect your real accounts.' : 'Payday syncs when you open it and when you tap Sync now. Matching payments show up on the Paycheck tab.') + '</div>';
+    h += '<div class="section-foot">' + (plaid.env === 'sandbox' ? 'Sandbox mode uses fake banks for testing. Sign in with user_good and pass_good. Switch PLAID_ENV to production in wrangler.toml to connect your real accounts.' : 'Payday syncs every morning, when you open it, and when you tap Sync now. Matching payments show up on the Paycheck tab.') + '</div>';
     return h + '</div>';
   }
   function plaidItemSheet(id) {
@@ -925,6 +982,7 @@ button.row:active { background: var(--surface-2); }
 
   // ---------- events ----------
   document.addEventListener('submit', function (e) {
+    if (e.target.id === 'login-form') { e.preventDefault(); doLogin(e.target); return; }
     if (e.target.id === 'onboard' || e.target.id === 'pay-form') { e.preventDefault(); applyPay(e.target, e.target.id === 'onboard'); }
   });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSheet(); });
@@ -973,6 +1031,9 @@ button.row:active { background: var(--surface-2); }
     if (a === 'notmatch') { (state.notMatch[key] = state.notMatch[key] || []).push(t.dataset.txn); render(); save(); reviewSheet(); return; }
     if (a === 'review') { reviewSheet(); return; }
     if (a === 'plaid-connect') { openLink(); return; }
+    if (a === 'sign-out') { signOut(); return; }
+    if (a === 'sign-out-all') { confirmSheet('Sign out everywhere', 'Every phone and computer signed in to Payday will need the password again, including this one.', 'Sign out everywhere', function () { api('POST', '/api/logout-everywhere').catch(function () {}).then(function () { setToken(null); showLogin(); }); }); return; }
+    if (a === 'retry') { start(); return; }
     if (a === 'plaid-sync') { syncNow(); return; }
     if (a === 'plaid-item') { plaidItemSheet(t.dataset.id); return; }
     if (a === 'plaid-fix') { closeSheet(); openLink(t.dataset.id); return; }
@@ -1040,24 +1101,35 @@ button.row:active { background: var(--surface-2); }
 
   // ---------- boot ----------
   renderTabs();
-  docRef = { set: function (body) { return api('PUT', '/api/state', body); } };
-  txnCol = { doc: function (mk) { return {
-    set: function (d) { return api('PUT', '/api/transactions/month/' + mk, d); },
-    delete: function () { return api('DELETE', '/api/transactions/month/' + mk); }
-  }; } };
-  Promise.all([loadState(), loadTxns()]).then(function () {
-    storeOk = true; render();
-    return loadPlaid().then(function () {
-      if (!sheetOpen()) render();
-      var stale = plaid.items.some(function (i) { return !i.error && (!i.last_synced || Date.now() - new Date(i.last_synced).getTime() > 4 * 3600e3); });
-      if (plaid.configured && stale) syncNow(true);
+  function start() {
+    if (!getToken()) { showLogin(); return; }
+    document.querySelector('.tabbar').hidden = false;
+    docRef = { set: function (body) { return api('PUT', '/api/state', body); } };
+    txnCol = { doc: function (mk) { return {
+      set: function (d) { return api('PUT', '/api/transactions/month/' + mk, d); },
+      delete: function () { return api('DELETE', '/api/transactions/month/' + mk); }
+    }; } };
+    Promise.all([loadState(), loadTxns()]).then(function () {
+      storeOk = true; render();
+      return loadPlaid().then(function () {
+        if (!sheetOpen()) render();
+        if (/[?&]oauth_state_id=/.test(location.search)) { resumeOAuth(); return; }
+        var stale = plaid.items.some(function (i) { return !i.error && (!i.last_synced || Date.now() - new Date(i.last_synced).getTime() > 4 * 3600e3); });
+        if (plaid.configured && stale) syncNow(true);
+      });
+    }).catch(function (e) {
+      if (e && e.signedOut) return;
+      storeOk = false; docRef = null; txnCol = null;
+      if (!state) state = emptyState();
+      render(); toast("Can't reach your Payday backend. Check your connection and try again.");
     });
-  }).catch(function () {
-    storeOk = false; docRef = null; txnCol = null;
-    if (!state) state = emptyState();
-    render(); toast("Can't reach the Payday server. Start it with npm start, then reload.");
+  }
+  start();
+  window.addEventListener('pagehide', function () {
+    if (!saveTimer || !docRef || !state) return;
+    clearTimeout(saveTimer); saveTimer = null;
+    fetch(API + '/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() }, body: JSON.stringify(state), keepalive: true });
   });
-  window.addEventListener('beforeunload', function () { if (saveTimer && docRef) { clearTimeout(saveTimer); fetch('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state), keepalive: true }); } });
 })();
 </script>
 </body>
