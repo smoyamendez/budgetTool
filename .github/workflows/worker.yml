@@ -1,0 +1,47 @@
+# Deploys the backend to Cloudflare on every push to main that touches it.
+# Needs repository secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see README).
+name: Deploy backend to Cloudflare
+
+on:
+  push:
+    branches: [main]
+    paths: ['worker/**', 'migrations/**', 'wrangler.toml', 'package.json', 'package-lock.json', '.github/workflows/worker.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check for Cloudflare secrets
+        id: check
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::Skipping deploy. Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.ready == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.ready == 'true'
+        with:
+          node-version: 20
+          cache: npm
+      - if: steps.check.outputs.ready == 'true'
+        run: npm ci
+      - if: steps.check.outputs.ready == 'true'
+        run: npm run typecheck
+      - name: Apply database changes
+        if: steps.check.outputs.ready == 'true'
+        run: npx wrangler d1 migrations apply payday --remote
+      - name: Deploy
+        if: steps.check.outputs.ready == 'true'
+        run: npx wrangler deploy
