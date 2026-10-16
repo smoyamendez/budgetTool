@@ -27,6 +27,6 @@ ALLOWED_ORIGINS = "https://smoyamendez.github.io,http://localhost:8787"
 # Secrets are set with `npx wrangler secret put NAME`, never written in this file:
 #   APP_PASSWORD           the password you sign in with
 #   TOKEN_ENCRYPTION_KEY   32 random bytes, base64 (encrypts Plaid access tokens)
-#   PLAID_CLIENT_ID="6ad021e9c7f5f3000c02fb66"
-#   PLAID_SECRET="ed70de40194058f19b97531f292a5b"
+#   PLAID_CLIENT_ID
+#   PLAID_SECRET
 #   PLAID_REDIRECT_URI     optional, for banks that sign in on their own site
