@@ -20,7 +20,7 @@ migrations_dir = "migrations"
 crons = ["15 11 * * *"]
 
 [vars]
-PLAID_ENV = "sandbox"
+PLAID_ENV = "production"
 # Websites allowed to call this API, comma separated. Your GitHub Pages address goes here.
 ALLOWED_ORIGINS = "https://smoyamendez.github.io,http://localhost:8787"
 
