@@ -12,7 +12,7 @@ directory = "./public"
 binding = "DB"
 database_name = "payday"
 # Replace with the id that `npx wrangler d1 create payday` prints. See README.
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "cbc1a501-14d6-4ad4-b66b-09ffe807d658"
 migrations_dir = "migrations"
 
 # Pull new bank transactions every day at 11:15 UTC (7:15 AM Eastern in summer).
@@ -27,6 +27,6 @@ ALLOWED_ORIGINS = "https://smoyamendez.github.io,http://localhost:8787"
 # Secrets are set with `npx wrangler secret put NAME`, never written in this file:
 #   APP_PASSWORD           the password you sign in with
 #   TOKEN_ENCRYPTION_KEY   32 random bytes, base64 (encrypts Plaid access tokens)
-#   PLAID_CLIENT_ID
-#   PLAID_SECRET
+#   PLAID_CLIENT_ID="6ad021e9c7f5f3000c02fb66"
+#   PLAID_SECRET="ed70de40194058f19b97531f292a5b"
 #   PLAID_REDIRECT_URI     optional, for banks that sign in on their own site
