@@ -966,9 +966,8 @@ button.row:active { background: var(--surface-2); }
       }).join('') + '</div><div class="section-foot">Tap a bucket to see its purchases or change its stores and categories.</div></div>';
     } else h += '<div class="list"><div class="empty">Add buckets like Groceries, Gas or Eating out, then sort your card and bank purchases into them.</div></div>';
     h += '<button class="btn filled block" data-act="add-budget">Add bucket</button>';
-    if (!sp.unsorted.length && purch.filter === 'unsorted') purch.filter = 'all';
     h += '<div class="section" id="purchases"><div class="section-label">Purchases</div>' +
-      '<div class="seg" role="tablist" aria-label="Which purchases">' + [['all', 'All'], ['unsorted', 'Not sorted' + (sp.unsorted.length ? ' (' + sp.unsorted.length + ')' : '')]].map(function (f) {
+      '<div class="seg" role="tablist" aria-label="Which purchases">' + [['all', 'All'], ['unsorted', 'Not sorted (' + purchaseList(ym, 'unsorted', '').length + ')']].map(function (f) {
         return '<button role="tab" data-act="purch-filter" data-v="' + f[0] + '" aria-selected="' + (purch.filter === f[0]) + '" class="' + (purch.filter === f[0] ? 'on' : '') + '">' + f[1] + '</button>';
       }).join('') + '</div>' +
       '<div class="list"><div class="field"><label for="p-q">Search</label><input id="p-q" type="search" placeholder="Store or amount" autocomplete="off" value="' + esc(purch.q) + '"></div></div>' +
@@ -979,17 +978,22 @@ button.row:active { background: var(--surface-2); }
   }
   var purch = { filter: 'all', other: false, q: '' };
   // This month's purchases with the bucket each one is in. Transfers and payments show only when asked for, or once you've sorted them.
-  function purchaseRows(ym) {
-    var linked = linkedMap(), q = purch.q.toLowerCase().trim(), qn = num(q), names = {};
-    state.budget.forEach(function (b) { names[b.id] = b.name; });
-    var list = txns.filter(function (t) {
+  function purchaseList(ym, filter, q) {
+    var linked = linkedMap(), qn = num(q);
+    q = String(q || '').toLowerCase().trim();
+    return txns.filter(function (t) {
       if (t.date.slice(0, 7) !== ym || linked[t.transaction_id] || !t.amount) return false;
       if (!counts(t, linked) && !(purch.other && t.amount > 0)) return false;
       if (t.amount < 0 && !bucketFor(t)) return false;
-      if (purch.filter === 'unsorted' && bucketFor(t)) return false;
+      if (filter === 'unsorted' && bucketFor(t)) return false;
       return !q || (String(t.name || '') + ' ' + String(t.merchant_name || '')).toLowerCase().indexOf(q) >= 0 || (qn > 0 && Math.abs(Math.abs(t.amount) - qn) < 0.005);
     });
-    if (!list.length) return '<div class="empty">' + (q ? 'No purchases match that search.' : purch.filter === 'unsorted' ? 'Everything this month is sorted.' : 'No purchases this month yet.') + '</div>';
+  }
+  function purchaseRows(ym) {
+    var q = purch.q.toLowerCase().trim(), names = {};
+    state.budget.forEach(function (b) { names[b.id] = b.name; });
+    var list = purchaseList(ym, purch.filter, q);
+    if (!list.length) return '<div class="empty">' + (q ? 'No purchases match that search.' : purch.filter === 'unsorted' ? 'Everything this month is in a bucket. Nice work.' : 'No purchases this month yet.') + '</div>';
     return list.map(function (t) {
       var r = bucketFor(t), tag = !r ? badge('due', 'Not sorted') : r.id === 'none' ? badge('', 'Not budget') : badge('debt', names[r.id] || 'Bucket');
       return '<button type="button" class="row plain" data-act="txn" data-txn="' + esc(t.transaction_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(t.merchant_name || t.name) + '</span><span class="sub muted" style="display:block">' + fmtShort(t.date) + (t.pending ? ' · pending' : '') + ' · ' + esc(t.account_name || '') + '</span></span>' +
