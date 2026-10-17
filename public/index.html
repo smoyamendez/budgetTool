@@ -280,7 +280,7 @@ button.row:active { background: var(--surface-2); }
   var BILL_FREQ = [['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'], ['semimonthly', 'Twice a month'], ['monthly', 'Monthly'], ['quarterly', 'Every 3 months'], ['yearly', 'Once a year']];
   var FREQ_NAME = {}; BILL_FREQ.forEach(function (f) { FREQ_NAME[f[0]] = f[1]; });
   var PER_MONTH_BILL = { weekly: 52 / 12, biweekly: 26 / 12, semimonthly: 2, monthly: 1, quarterly: 1 / 3, yearly: 1 / 12 };
-  function monthlyCost(b) { return (+b.amount || 0) * (PER_MONTH_BILL[b.freq || 'monthly'] || 1); }
+  function monthlyCost(b) { return (amountOn({ amount: +b.amount || 0, changes: (b.changes || []).slice().sort(function (x, y) { return x.from < y.from ? -1 : 1; }) }, TODAY) || 0) * (PER_MONTH_BILL[b.freq || 'monthly'] || 1); }
   // Every due date for a bill from one day to another, inclusive.
   function dueDates(src, from, to) {
     var f = src.freq || 'monthly', out = [];
@@ -303,19 +303,22 @@ button.row:active { background: var(--surface-2); }
     return out.sort();
   }
   function makeSources(allDebts) {
-    return state.bills.map(function (b) { return { kind: 'bill', id: b.id, name: b.name, amount: +b.amount || 0, dueDay: +b.dueDay || 1, freq: b.freq || 'monthly', dueDay2: +b.dueDay2 || 15, start: b.start || '', essential: !!b.essential, variable: !!b.variable, match: b.match || '', account: b.account || '' }; })
+    return state.bills.map(function (b) { return { kind: 'bill', id: b.id, name: b.name, amount: +b.amount || 0, dueDay: +b.dueDay || 1, freq: b.freq || 'monthly', dueDay2: +b.dueDay2 || 15, start: b.start || '', changes: (b.changes || []).slice().sort(function (x, y) { return x.from < y.from ? -1 : 1; }), essential: !!b.essential, variable: !!b.variable, match: b.match || '', account: b.account || '' }; })
       .concat(state.debts.filter(function (d) { return (allDebts || d.balance > 0.004) && d.minimum > 0; }).map(function (d) {
         return { kind: 'debt', id: d.id, name: d.name, amount: d.balance > 0.004 ? Math.min(+d.minimum, +d.balance) : +d.minimum, dueDay: +d.dueDay || 1, essential: true, match: d.match || '', balance: +d.balance, account: d.account || '' };
       }));
   }
+  // A bill's usual amount on a date: its base amount, or the latest change that has started by then.
+  function amountOn(src, due) { var a = src.amount; (src.changes || []).forEach(function (c) { if (c.from <= due) a = +c.amount; }); return a; }
   function itemFor(src, due) {
     var key = src.id + '@' + due, p = state.paid[key] || null, S = state.settings;
-    var actual = src.variable && state.actuals[key] != null ? +state.actuals[key] : null;
-    var planned = actual != null ? actual : src.amount;
+    // An amount saved for this one date wins over the usual amount.
+    var actual = state.actuals[key] != null ? +state.actuals[key] : null, usual = amountOn(src, due);
+    var planned = actual != null ? actual : usual;
     var paidAmt = p ? (p.amount != null ? +p.amount : planned) : null;
     var status = p ? 'paid' : (S.trackFrom && due < S.trackFrom) ? 'untracked' : due < TODAY ? 'late' : daysBetween(TODAY, due) <= 3 ? 'due' : 'upcoming';
     return { key: key, kind: src.kind, id: src.id, name: src.name, src: src, planned: planned, amount: p ? paidAmt : planned, paidAmount: paidAmt, paidOn: p ? p.on : null, txn: p && p.txn ? p.txn : null,
-      estimate: src.amount, variable: !!src.variable, estimated: !p && !!src.variable && actual == null, due: due, status: status, essential: src.essential };
+      estimate: usual, usual: usual, custom: actual != null, variable: !!src.variable, estimated: !p && !!src.variable && actual == null, due: due, status: status, essential: src.essential };
   }
 
   // ---------- bank payments (stored in Plaid's transaction shape) ----------
@@ -1170,7 +1173,7 @@ button.row:active { background: var(--surface-2); }
     if (bills.length || state.debts.length) h += monthSection();
     if (bills.length) h += '<div class="section-label" style="margin-bottom:-16px">Your bills</div>';
     var rowFor = function (b) {
-      return '<button class="row plain" data-act="edit-bill" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + billWhen(b, nextDue(b)) + (b.essential ? ' · essential' : '') + (accountFor(b) ? ' · ' + esc(accountFor(b)) : '') + '</span></span><span class="row-amount">' + (b.variable ? '~' : '') + money(+b.amount) + ((b.freq || 'monthly') !== 'monthly' ? '<span class="sub muted" style="display:block;text-align:right">' + money(monthlyCost(b)) + '/mo</span>' : '') + '</span>' + I.chev + '</button>';
+      return '<button class="row plain" data-act="edit-bill" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + billWhen(b, nextDue(b)) + (b.essential ? ' · essential' : '') + (function () { var up = (b.changes || []).filter(function (c) { return c.from > TODAY; }).sort(function (x, y) { return x.from < y.from ? -1 : 1; })[0]; return up ? ' · ' + money(+up.amount) + ' from ' + fmtShort(up.from) : ''; })() + (accountFor(b) ? ' · ' + esc(accountFor(b)) : '') + '</span></span><span class="row-amount">' + (b.variable ? '~' : '') + money(+b.amount) + ((b.freq || 'monthly') !== 'monthly' ? '<span class="sub muted" style="display:block;text-align:right">' + money(monthlyCost(b)) + '/mo</span>' : '') + '</span>' + I.chev + '</button>';
     };
     if (!bills.length) {
       h += '<div class="list"><div class="empty">No bills yet. Add rent, utilities, subscriptions and anything else that repeats each month.</div></div>';
@@ -1228,7 +1231,7 @@ button.row:active { background: var(--surface-2); }
     var share = paidTotal + openTotal > 0 ? paidTotal / (paidTotal + openTotal) : 0;
     var label = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     var h = '<div class="section"><div class="month-head"><button class="pager-btn" data-act="month-prev" aria-label="Previous month"' + (monthOffset <= -12 ? ' disabled' : '') + '>' + I.left + '</button>' +
-      '<div class="headline">' + label + '</div><button class="pager-btn" data-act="month-next" aria-label="Next month"' + (monthOffset >= 3 ? ' disabled' : '') + '>' + I.right + '</button></div>' +
+      '<div class="headline">' + label + '</div><button class="pager-btn" data-act="month-next" aria-label="Next month"' + (monthOffset >= 12 ? ' disabled' : '') + '>' + I.right + '</button></div>' +
       '<section class="card hero" aria-label="' + label + ' totals"><div class="card-top"><div><div class="foot muted">Paid so far</div><div class="amount-hero">' + money(paidTotal, true) + '</div></div></div>' +
       '<div class="progress" role="progressbar" aria-label="Share of this month\'s bills paid" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(share * 100) + '"><div style="width:' + (share * 100) + '%"></div></div>' +
       '<div class="meta"><span>' + paid.length + ' of ' + (paid.length + open.length) + ' paid' + (bank ? ' · ' + bank + ' from bank' : '') + '</span><span>' + (open.length ? money(openTotal) + ' still to pay' : 'All paid') + '</span></div>' +
@@ -1478,10 +1481,12 @@ button.row:active { background: var(--surface-2); }
       if (txns.length) b += '<div class="section"><div class="section-label">Link a bank payment</div>' + (cands.length ? '<div class="list">' + cands.map(function (c, i) {
         return txnRow(k, c.t, i === 0 && c.score >= 3 ? badge('accent', 'Best match') : '');
       }).join('') + '</div>' : '') + pickButton(k, cands.length ? 'Choose a different payment' : 'Choose a bank payment') + '<div class="section-foot">Tap a payment to mark this bill paid with that amount.</div></div>';
-      b += '<div class="section"><div class="section-label">' + (it.variable ? (it.estimated ? 'Variable bill. Your estimate is ' + money(it.estimate) + '.' : 'Variable bill. Estimate was ' + money(it.estimate) + '.') : 'Or enter it yourself') + '</div><div class="list"><div class="field"><label for="i-amt">' + (it.variable ? 'This month' : 'Amount paid') + '</label><input id="i-amt" inputmode="decimal" placeholder="' + money(it.planned) + '" value="' + (it.estimated ? '' : money(it.planned)) + '"></div></div>' +
-        '<div class="section-foot">' + (it.variable ? 'Enter the amount on this month\'s bill. Save it now, or mark it paid once you pay.' : 'Change this if you paid a different amount.') + '</div></div>';
+      b += '<div class="section"><div class="section-label">Amount for ' + fmtShort(it.due) + '</div><div class="list"><div class="field"><label for="i-amt">' + (it.variable && it.estimated ? 'Estimate' : 'Amount') + '</label><input id="i-amt" inputmode="decimal" placeholder="' + money(it.planned) + '" value="' + (it.estimated ? '' : money(it.planned)) + '"></div></div>' +
+        '<div class="section-foot">' + (it.custom ? 'Changed for this date. The usual amount is ' + money(it.usual) + '. ' : it.variable ? 'Variable bill. Your estimate is ' + money(it.usual) + '. ' : 'The usual amount is ' + money(it.usual) + '. ') + 'Change it for just this date, or from this date on if the bill is going up or down.</div></div>';
       b += '<div class="actions"><button type="button" class="btn filled" data-act="pay" data-key="' + k + '">Mark paid</button>';
-      if (it.variable) b += '<button type="button" class="btn tinted" data-act="save-actual" data-key="' + k + '">Save amount, not paid yet</button>';
+      b += '<button type="button" class="btn tinted" data-act="save-actual" data-key="' + k + '">Save for ' + fmtShort(it.due) + ' only</button>';
+      if (it.kind === 'bill') b += '<button type="button" class="btn tinted" data-act="save-from" data-key="' + k + '">Use from ' + fmtShort(it.due) + ' on</button>';
+      if (it.custom) b += '<button type="button" class="btn tinted" data-act="clear-actual" data-key="' + k + '">Back to usual amount</button>';
       if (!it.carried && check) {
         if (next) b += '<button type="button" class="btn tinted" data-act="move" data-key="' + k + '" data-to="' + next + '">Move to ' + fmtShort(next) + ' paycheck' + (next > it.due ? ' (after due date)' : '') + '</button>';
         if (prev && prev >= addDays(it.due, -45)) b += '<button type="button" class="btn tinted" data-act="move" data-key="' + k + '" data-to="' + prev + '">Move to ' + fmtShort(prev) + ' paycheck</button>';
@@ -1509,6 +1514,9 @@ button.row:active { background: var(--surface-2); }
       '<div class="field"><label for="b-ess">Essential</label><input id="b-ess" name="essential" type="checkbox"' + (b.essential ? ' checked' : '') + '></div>' +
       '<div class="field"><label for="b-match">On bank statement</label><input id="b-match" name="match" placeholder="Optional" value="' + esc(b.match || '') + '" maxlength="80"></div>' +
       accountField('b-acct', b.account, 'Pays from', id ? accountFor(b) || 'Optional' : 'Optional') + '</div>' +
+      (b.changes && b.changes.length ? '<div class="section"><div class="section-label">Amount changes</div><div class="list">' + b.changes.slice().sort(function (x, y) { return x.from < y.from ? -1 : 1; }).map(function (c) {
+        return '<div class="txn-row"><div class="row-main"><div class="row-title">' + money(+c.amount) + '</div><div class="sub muted">From ' + fmtDay(c.from) + ' on</div></div><button type="button" class="linkbtn" data-act="del-change" data-id="' + b.id + '" data-from="' + esc(c.from) + '">Remove</button></div>';
+      }).join('') + '</div><div class="section-foot">Amount above is what it was before these. Add a change by tapping the bill on a future date.</div></div>' : '') +
       '<div class="section-foot">Essential bills are things like rent, power and insurance. Payday lists them first when money is tight. "On bank statement" is the text your bank shows for this payment, like ATT*BILL. Separate a few with commas. It helps Payday match imported payments.</div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-bill" data-id="' + id + '">Delete bill</button>' : '');
     setTimeout(billFreqFields, 0);
@@ -1646,12 +1654,28 @@ button.row:active { background: var(--surface-2); }
     if (a === 'pay-go') { payOffset = +t.dataset.off || 0; render(); return; }
     if (a === 'pay-next') { payOffset++; render(); return; }
     if (a === 'item') { itemSheet(key); return; }
+    if (a === 'clear-actual') { delete state.actuals[key]; closeSheet(); render(); save('Back to the usual amount'); return; }
+    if (a === 'save-from') {
+      var rf = findItem(key), elf = document.getElementById('i-amt'), vf = elf ? num(elf.value.trim()) : NaN; if (!rf) return;
+      if (!(vf >= 0)) { toast('Enter an amount like 104.37.'); return; }
+      var bf = state.bills.find(function (x) { return x.id === rf.it.id; }); if (!bf) return;
+      var due = rf.it.due;
+      bf.changes = (bf.changes || []).filter(function (c) { return c.from < due; }).concat([{ from: due, amount: Math.round(vf * 100) / 100 }]);
+      // A later date's one-off amount would hide the new usual amount, so those go.
+      Object.keys(state.actuals).forEach(function (kk) { if (kk.indexOf(bf.id + '@') === 0 && kk.slice(kk.lastIndexOf('@') + 1) >= due) delete state.actuals[kk]; });
+      closeSheet(); render(); save(bf.name + ' is ' + money(vf) + ' from ' + fmtShort(due) + ' on'); return;
+    }
+    if (a === 'del-change') {
+      var bd = state.bills.find(function (x) { return x.id === t.dataset.id; }); if (!bd) return;
+      bd.changes = (bd.changes || []).filter(function (c) { return c.from !== t.dataset.from; });
+      billSheet(bd.id); render(); save('Change removed'); return;
+    }
     if (a === 'pay' || a === 'save-actual' || a === 'save-paid') {
       var r = findItem(key); if (!r) return;
       var el = document.getElementById('i-amt'), raw = el ? el.value.trim() : '', v = num(raw);
       if (raw && !(v >= 0)) { toast('Enter an amount like 104.37.'); return; }
       var amt = raw ? Math.round(v * 100) / 100 : null;
-      if (a === 'save-actual') { if (amt != null) state.actuals[key] = amt; else delete state.actuals[key]; closeSheet(); render(); save(amt != null ? 'Amount saved' : 'Using the estimate'); return; }
+      if (a === 'save-actual') { if (amt != null) state.actuals[key] = amt; else delete state.actuals[key]; closeSheet(); render(); save(amt != null ? 'Saved ' + money(amt) + ' for ' + fmtShort(r.it.due) : 'Using the usual amount'); return; }
       if (a === 'save-paid') { var pp = state.paid[key]; if (amt == null) { toast('Enter the amount you paid.'); return; } setPaid(r.it, { on: pp ? pp.on : TODAY, amount: amt, txn: pp && pp.txn }); closeSheet(); render(); save('Amount updated'); return; }
       setPaid(r.it, { on: TODAY, amount: amt != null ? amt : Math.round(r.it.planned * 100) / 100 });
       closeSheet(); render(); save('Marked paid'); return;
