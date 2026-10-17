@@ -229,14 +229,14 @@ button.row:active { background: var(--surface-2); }
   var state = null, docRef = null, saveTimer = null, tab = 'home', payOffset = 0, storeOk = false;
   function emptyState() {
     return { settings: { payAmount: 0, frequency: 'biweekly', nextPayDate: '', buffer: 0, strategy: 'avalanche', trackFrom: '', examples: false },
-      bills: [], debts: [], budget: [], paid: {}, moves: {}, payAmounts: {}, extra: {}, reserved: {}, actuals: {}, notMatch: {}, txnBudget: {} };
+      bills: [], debts: [], budget: [], paid: {}, moves: {}, payAmounts: {}, extra: {}, reserved: {}, actuals: {}, notMatch: {}, txnBudget: {}, accounts: {} };
   }
   function normalize(d) {
     var s = emptyState();
     d = d || {};
     s.settings = Object.assign(s.settings, d.settings || {});
     ['bills', 'debts', 'budget'].forEach(function (k) { if (Array.isArray(d[k])) s[k] = d[k]; });
-    ['paid', 'moves', 'payAmounts', 'extra', 'reserved', 'actuals', 'notMatch', 'txnBudget'].forEach(function (k) { if (d[k] && typeof d[k] === 'object') s[k] = Object.assign({}, d[k]); });
+    ['paid', 'moves', 'payAmounts', 'extra', 'reserved', 'actuals', 'notMatch', 'txnBudget', 'accounts'].forEach(function (k) { if (d[k] && typeof d[k] === 'object') s[k] = Object.assign({}, d[k]); });
     Object.keys(s.paid).forEach(function (k) { var v = s.paid[k]; if (!v || typeof v !== 'object') s.paid[k] = { on: typeof v === 'string' ? v : TODAY, amount: null }; });
     s.bills = s.bills.map(function (b) { return Object.assign({}, b); });
     s.debts = s.debts.map(function (b) { return Object.assign({}, b); });
@@ -364,19 +364,48 @@ button.row:active { background: var(--surface-2); }
       if (r.errors && r.errors.length) toast(r.errors[0].institution + ': ' + r.errors[0].message); else if (!quiet) toast('Balances updated');
     }).catch(function (e) { balState.busy = false; if (tab === 'accounts' && !sheetOpen()) render(); if (!quiet && !e.signedOut) toast(e.message || "Couldn't update balances."); });
   }
+  // ---------- account types ----------
+  var KINDS = [['checking', 'Checking'], ['savings', 'Savings'], ['credit', 'Credit cards'], ['loan', 'Loans']];
+  var KIND_ONE = { checking: 'Checking', savings: 'Savings', credit: 'Credit card', loan: 'Loan' };
+  function acctKey(n) { return String(n || '').trim().toLowerCase(); }
+  function plaidKind(b) { return b.type === 'credit' ? 'credit' : b.type === 'loan' ? 'loan' : /savings|money market|cd/.test(b.subtype || '') ? 'savings' : 'checking'; }
+  // The type you chose wins over Plaid's. Accounts Payday can't place are treated as checking.
+  function kindOfName(n) {
+    var m = state.accounts[acctKey(n)]; if (m && m.kind) return m.kind;
+    var b = plaidBalances().find(function (x) { return sameAcct(x.name, n); });
+    return b ? plaidKind(b) : 'checking';
+  }
+  function isOwed(kind) { return kind === 'credit' || kind === 'loan'; }
+  // Every account Payday knows about: linked through Plaid, named on a bill, or added by you.
+  function allAccounts() {
+    var out = [];
+    var get = function (n) { var a = out.find(function (x) { return sameAcct(x.name, n); }); if (!a) { a = { name: String(n).trim(), plaid: null }; out.push(a); } return a; };
+    plaidBalances().forEach(function (b) { get(b.name).plaid = b; });
+    accountNames().forEach(get);
+    out.forEach(function (a) {
+      var m = state.accounts[acctKey(a.name)] || {};
+      a.meta = m; a.kind = kindOfName(a.name); a.hidden = !!m.hidden;
+      if (a.plaid) {
+        var cur = a.plaid.current != null ? +a.plaid.current : null;
+        a.balance = isOwed(a.kind) ? cur : a.plaid.available != null ? +a.plaid.available : cur;
+        a.current = cur; a.asOf = a.plaid.as_of;
+      } else { a.balance = m.balance != null ? +m.balance : null; a.current = a.balance; a.asOf = m.balanceAt || null; }
+    });
+    return out;
+  }
   var CARD_ALIAS = { amex: 'american express', citi: 'citi', discover: 'discover', apple: 'apple', applecard: 'apple', chase: 'chase', capital: 'capital one' };
   // Debts linked to a Plaid card take that card's balance. A debt whose name points at exactly one linked card gets linked once on its own.
   function linkCards() {
-    var cards = plaidBalances().filter(function (b) { return b.type === 'credit'; }), changed = false;
+    var owed = allAccounts().filter(function (a) { return isOwed(a.kind); }), changed = false;
     state.debts.forEach(function (d) {
       if (d.card === undefined) {
         var words = String(d.name || '').toLowerCase().split(/[^a-z]+/).filter(function (w) { return w.length >= 4 || CARD_ALIAS[w]; });
-        var hits = cards.filter(function (c) { var hay = (c.institution + ' ' + c.name).toLowerCase().replace(/[^a-z ]/g, ''); return words.some(function (w) { return hay.indexOf(CARD_ALIAS[w] || w) >= 0; }); });
+        var hits = owed.filter(function (c) { if (!c.plaid) return false; var hay = (c.plaid.institution + ' ' + c.name).toLowerCase().replace(/[^a-z ]/g, ''); return words.some(function (w) { return hay.indexOf(CARD_ALIAS[w] || w) >= 0; }); });
         if (hits.length === 1) { d.card = hits[0].name; changed = true; }
       }
-      var c = d.card && cards.find(function (x) { return sameAcct(x.name, d.card); });
-      if (c && c.current != null && Math.abs(+c.current - +d.balance) > 0.004) {
-        d.balance = Math.max(0, Math.round(+c.current * 100) / 100);
+      var c = d.card && owed.find(function (x) { return sameAcct(x.name, d.card); });
+      if (c && c.balance != null && Math.abs(c.balance - +d.balance) > 0.004) {
+        d.balance = Math.max(0, Math.round(c.balance * 100) / 100);
         if (!(+d.startBalance >= d.balance)) d.startBalance = d.balance;
         changed = true;
       }
@@ -391,6 +420,7 @@ button.row:active { background: var(--surface-2); }
     txns.forEach(function (t) { add(t.account_name); });
     state.bills.concat(state.debts, state.budget).forEach(function (x) { add(x.account); });
     add(state.settings.payAccount);
+    Object.keys(state.accounts).forEach(function (k) { add(state.accounts[k].name); });
     return out;
   }
   // Where your paycheck lands: what you chose in Settings, else the account with the biggest deposits.
@@ -400,7 +430,7 @@ button.row:active { background: var(--surface-2); }
     var cards = plaidBalances().filter(function (b) { return b.type === 'credit'; });
     txns.forEach(function (t) {
       if (!(t.amount < -500) || !t.account_name || /payment|thank you|autopay|transfer/i.test(t.name || '')) return;
-      if (cards.some(function (b) { return sameAcct(b.name, t.account_name); })) return;
+      if (cards.some(function (b) { return sameAcct(b.name, t.account_name); }) || isOwed((state.accounts[acctKey(t.account_name)] || {}).kind)) return;
       tot[t.account_name] = (tot[t.account_name] || 0) - t.amount;
     });
     Object.keys(tot).forEach(function (k) { if (!best || tot[k] > tot[best]) best = k; });
@@ -803,9 +833,10 @@ button.row:active { background: var(--surface-2); }
     if (!by.length) return '';
     by.sort(function (a, b) { return sameAcct(a.name, home) ? -1 : sameAcct(b.name, home) ? 1 : b.total - a.total; });
     var h = by.map(function (g) {
-      var move = home && g.name && !sameAcct(g.name, home);
+      var owedAcct = isOwed(kindOfName(g.name)), move = home && g.name && !sameAcct(g.name, home) && !owedAcct;
       return '<div class="txn-row"><div class="row-main"><div class="row-title">' + esc(g.name || 'No account set') + '</div><div class="sub muted">' + esc(g.lines.join(', ')) + '</div>' +
         (move ? '<div class="sub" style="color:var(--accent)">Move ' + money(g.total) + ' here from ' + esc(home) + (g.due ? ' by ' + fmtShort(g.due) : '') + '</div>' : '') +
+        (owedAcct ? '<div class="sub muted">Charged to this ' + (kindOfName(g.name) === 'loan' ? 'loan' : 'card') + ', no transfer needed</div>' : '') +
         (!g.name ? '<div class="sub muted">Set "Pays from" on these bills.</div>' : '') + '</div><div class="row-amount">' + money(g.total) + '</div></div>';
     }).join('');
     return '<div class="section"><div class="section-label">Coming out of each account</div><div class="list">' + h + '</div>' +
@@ -815,47 +846,79 @@ button.row:active { background: var(--surface-2); }
     var M = build();
     var h = '<div class="head"><h1 class="large-title">Accounts</h1><div class="sub muted">' + (M ? 'What\'s due before your ' + fmtShort(M.checks[M.cur + 1] ? M.checks[M.cur + 1].date : addDays(M.checks[M.cur].end, 1)) + ' paycheck' : 'Your balances and what comes out of each') + '</div></div>' + banners();
     if (!M) return h + '<div class="list"><div class="empty">Set your pay schedule in Settings first.</div></div>';
-    var bals = plaidBalances(), home = payAccount();
     if (plaid.items.length && !balState.busy && balanceAge() > 3600e3 && Date.now() - balState.tried > 300e3) setTimeout(function () { refreshBalances(true); }, 0);
-    var cashOf = function (b) { return b.available != null ? +b.available : +b.current || 0; };
-    var deps = bals.filter(function (b) { return b.type === 'depository'; }), creds = bals.filter(function (b) { return b.type === 'credit'; });
-    var cash = deps.reduce(function (s, b) { return s + cashOf(b); }, 0);
-    var owed = state.debts.reduce(function (s, d) { return s + Math.max(0, +d.balance || 0); }, 0);
-    // Everything unpaid on the current paycheck, including anything overdue.
+    var accts = allAccounts(), home = payAccount();
+    // Everything unpaid on the current paycheck, including anything overdue, grouped by the account it comes out of.
     var cur = M.checks[M.cur], groups = [];
     var add = function (name, it) { var g = groups.find(function (x) { return sameAcct(x.name, name); }); if (!g) { g = { name: name, items: [], total: 0 }; groups.push(g); } g.items.push(it); g.total += it.amount; };
     cur.items.forEach(function (it) { if (it.status !== 'paid') add(accountFor(it.src), it); });
-    var dueTotal = groups.reduce(function (s, g) { return s + g.total; }, 0);
-    h += '<section class="card hero"><div class="foot muted">Cash in your bank accounts</div><div class="amount-hero">' + (deps.length ? money(cash, true) : '—') + '</div>' +
+    var groupOf = function (n) { return groups.find(function (g) { return sameAcct(g.name, n); }) || { items: [], total: 0 }; };
+    var shown = accts.filter(function (a) { return !a.hidden || groupOf(a.name).items.length; });
+    var sum = function (k) { return shown.filter(function (a) { return a.kind === k && a.balance != null; }).reduce(function (s, a) { return s + a.balance; }, 0); };
+    var anyCash = shown.some(function (a) { return a.kind === 'checking' && a.balance != null; });
+    var dueCash = groups.filter(function (g) { return !isOwed(kindOfName(g.name)) && kindOfName(g.name) !== 'savings'; }).reduce(function (s, g) { return s + g.total; }, 0);
+    var checking = sum('checking'), extras = [];
+    if (sum('savings')) extras.push(money(sum('savings')) + ' in savings');
+    if (sum('credit')) extras.push(money(sum('credit')) + ' owed on cards');
+    if (sum('loan')) extras.push(money(sum('loan')) + ' owed on loans');
+    h += '<section class="card hero"><div class="foot muted">In checking</div><div class="amount-hero">' + (anyCash ? money(checking, true) : '—') + '</div>' +
       '<div class="sub muted">Available now, after pending charges</div><div class="ledger">' +
-      '<div><span>Bills and minimums still due</span><span>&minus;' + money(dueTotal) + '</span></div>' +
-      (deps.length ? '<div class="total' + (cash - dueTotal < -0.004 ? ' short' : '') + '"><span>After those</span><span>' + money(cash - dueTotal) + '</span></div>' : '') +
-      '</div><div class="sub muted">' + money(owed) + ' card debt on the Debt tab</div></section>';
-    var names = [];
-    var addName = function (n) { if (n && !names.some(function (x) { return sameAcct(x, n); })) names.push(n); };
-    addName(home); deps.forEach(function (b) { addName(b.name); }); groups.forEach(function (g) { addName(g.name); });
-    names.forEach(function (n) {
-      var b = deps.find(function (x) { return sameAcct(x.name, n); }), g = groups.find(function (x) { return sameAcct(x.name, n); }) || { items: [], total: 0 };
-      var bal = b ? cashOf(b) : null, after = bal != null ? bal - g.total : null, first = g.items.reduce(function (m, it) { return !m || it.due < m ? it.due : m; }, null);
-      var status = !g.items.length ? 'Nothing due before your next paycheck.' :
-        after == null ? 'Have ' + money(g.total) + ' here by ' + fmtShort(first) + '.' :
-        after < -0.004 ? 'Short ' + money(-after) + '. Move it here by ' + fmtShort(first) + '.' : money(after) + ' left after these.';
-      var pend = b && b.current != null && b.available != null ? +b.current - +b.available : 0;
-      h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>' + esc(n) + (sameAcct(n, home) ? ' · paycheck' : '') + '</span><span class="num">' + (bal != null ? money(bal) + ' available' : 'Not linked') + '</span></div>' +
-        (b && b.current != null && Math.abs(pend) > 0.004 ? '<div class="section-foot" style="margin-top:-8px">' + money(+b.current) + ' balance · ' + money(Math.abs(pend)) + (pend > 0 ? ' pending out' : ' pending in') + '</div>' : '') +
-        (g.items.length ? '<div class="list" role="list">' + g.items.map(itemRow).join('') + '</div>' : '') +
-        '<div class="section-foot"' + (after != null && after < -0.004 ? ' style="color:var(--late)"' : '') + '>' + status + '</div></div>';
+      '<div><span>Due from checking before payday</span><span>&minus;' + money(dueCash) + '</span></div>' +
+      (anyCash ? '<div class="total' + (checking - dueCash < -0.004 ? ' short' : '') + '"><span>After those</span><span>' + money(checking - dueCash) + '</span></div>' : '') +
+      '</div>' + (extras.length ? '<div class="sub muted">' + extras.join(' · ') + '</div>' : '') + '</section>';
+    KINDS.forEach(function (k) {
+      var list = shown.filter(function (a) { return a.kind === k[0]; }); if (!list.length) return;
+      var owedKind = isOwed(k[0]), tot = list.reduce(function (s, a) { return s + (a.balance || 0); }, 0);
+      h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>' + k[1] + '</span><span class="num">' + money(tot) + (owedKind ? ' owed' : '') + '</span></div>';
+      list.forEach(function (a) {
+        var g = groupOf(a.name), first = g.items.reduce(function (m, it) { return !m || it.due < m ? it.due : m; }, null);
+        var pend = a.plaid && a.plaid.current != null && a.plaid.available != null && !owedKind ? +a.plaid.current - +a.plaid.available : 0;
+        var sub = [a.plaid ? (a.plaid.institution || 'Linked') : a.balance != null ? 'Entered by you' + (a.asOf ? ' ' + fmtShort(a.asOf.slice(0, 10)) : '') : 'Not linked · no balance yet'];
+        if (sameAcct(a.name, home)) sub.push('paycheck lands here');
+        if (Math.abs(pend) > 0.004) sub.push(money(+a.plaid.current) + ' balance, ' + money(Math.abs(pend)) + (pend > 0 ? ' pending out' : ' pending in'));
+        if (owedKind && a.plaid && a.plaid.limit) sub.push(money(+a.plaid.limit) + ' limit');
+        var after = a.balance != null && !owedKind ? a.balance - g.total : null, status = '';
+        if (g.items.length) status = owedKind ? money(g.total) + ' charged here before payday.' :
+          after == null ? 'Have ' + money(g.total) + ' here by ' + fmtShort(first) + '.' :
+          after < -0.004 ? 'Short ' + money(-after) + '. Move it here by ' + fmtShort(first) + '.' : money(after) + ' left after these.';
+        h += '<div class="list" style="margin-bottom:8px" role="list"><button class="row plain" data-act="acct" data-name="' + esc(a.name) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(a.name) + '</span><span class="sub muted" style="display:block">' + esc(sub.join(' · ')) + '</span></span>' +
+          '<span class="row-amount">' + (a.balance != null ? money(a.balance) + (owedKind ? ' owed' : '') : 'Add balance') + '</span>' + I.chev + '</button>' +
+          g.items.map(itemRow).join('') + '</div>' +
+          (status ? '<div class="section-foot" style="margin:-4px 0 12px"' + (after != null && after < -0.004 ? ' ' : '') + '><span' + (after != null && after < -0.004 ? ' style="color:var(--late)"' : '') + '>' + status + '</span></div>' : '');
+      });
+      h += '</div>';
     });
     var none = groups.find(function (g) { return !g.name; });
     if (none) h += '<div class="section"><div class="section-label">No account set</div><div class="list" role="list">' + none.items.map(itemRow).join('') + '</div><div class="section-foot">Edit these on the Bills or Debt tab and set "Pays from".</div></div>';
-    if (creds.length) h += '<div class="section"><div class="section-label">Linked cards</div><div class="list">' + creds.map(function (b) {
-      return '<div class="txn-row"><div class="row-main"><div class="row-title">' + esc(b.name) + '</div><div class="sub muted">' + (b.limit ? money(+b.limit) + ' limit' : 'Credit card') + '</div></div><div class="row-amount">' + money(+b.current || 0) + ' owed</div></div>';
-    }).join('') + '</div></div>';
-    var asOf = bals.map(function (b) { return b.as_of; }).filter(Boolean).sort()[0], live = bals.length && bals.every(function (b) { return b.live; });
-    if (plaid.items.length) h += '<button class="btn tinted block" data-act="bal-refresh"' + (balState.busy ? ' disabled' : '') + '>' + (balState.busy ? 'Checking your banks' : 'Refresh balances') + '</button>';
-    h += '<div class="section-foot">' + (!plaid.items.length ? 'Connect your banks in Settings to see balances here.' : !bals.length ? 'No balances yet. Tap Refresh balances.' :
-      (live ? 'Live from your banks' : 'From Plaid\'s latest update') + (asOf ? ' as of ' + fmtStamp(asOf) : '') + '. Available is what you can spend now, after pending charges. ' + (live ? '' : 'Your plan may not include live balance checks, so these can be a few hours old.')) + '</div>';
+    var hidden = accts.filter(function (a) { return a.hidden && !groupOf(a.name).items.length; });
+    if (hidden.length) h += '<div class="section"><div class="section-label">Hidden</div><div class="list">' + hidden.map(function (a) { return '<button class="row plain" data-act="acct" data-name="' + esc(a.name) + '"><span class="row-main muted">' + esc(a.name) + '</span>' + I.chev + '</button>'; }).join('') + '</div></div>';
+    h += '<div class="actions">' + (plaid.items.length ? '<button class="btn tinted" data-act="bal-refresh"' + (balState.busy ? ' disabled' : '') + '>' + (balState.busy ? 'Checking your banks' : 'Refresh balances') + '</button>' : '') + '<button class="btn tinted" data-act="acct-add">Add an account</button></div>';
+    var bals = plaidBalances(), asOf = bals.map(function (b) { return b.as_of; }).filter(Boolean).sort()[0], live = bals.length && bals.every(function (b) { return b.live; });
+    h += '<div class="section-foot">Tap an account to set its type: checking, savings, credit card or loan. ' + (!plaid.items.length ? 'Connect your banks in Settings to see balances here.' : !bals.length ? 'No balances yet. Tap Refresh balances.' :
+      (live ? 'Linked balances are live from your banks' : 'Linked balances are from Plaid\'s latest update') + (asOf ? ' as of ' + fmtStamp(asOf) : '') + '.' + (live ? '' : ' Your plan may not include live balance checks, so they can be a few hours old.')) + '</div>';
     return h;
+  }
+  function accountSheet(name) {
+    var a = name ? allAccounts().find(function (x) { return sameAcct(x.name, name); }) : null, kind = a ? a.kind : 'checking';
+    var manual = !a || !a.plaid;
+    var body = '<div class="list">' +
+      (a ? '<div class="field"><label>Name</label><span class="muted" style="text-align:right;min-width:0;overflow-wrap:anywhere">' + esc(a.name) + '</span></div>' : '<div class="field"><label for="ac-name">Name</label><input id="ac-name" name="name" placeholder="First Tech Checking" required maxlength="60"></div>') +
+      '<div class="field"><label for="ac-kind">Type</label><select id="ac-kind" name="kind">' + KINDS.map(function (k) { return '<option value="' + k[0] + '"' + (kind === k[0] ? ' selected' : '') + '>' + KIND_ONE[k[0]] + '</option>'; }).join('') + '</select></div>' +
+      (manual ? '<div class="field"><label for="ac-bal">Balance</label><input id="ac-bal" name="balance" inputmode="decimal" placeholder="$0.00" value="' + (a && a.balance != null ? money(a.balance) : '') + '"></div>' : '') +
+      (a ? '<div class="field"><label for="ac-hide">Hide from Accounts</label><input id="ac-hide" name="hidden" type="checkbox"' + (a.hidden ? ' checked' : '') + '></div>' : '') + '</div>' +
+      '<div class="section-foot">' + (a && a.plaid ? 'Linked through Plaid' + (a.plaid.institution ? ' (' + esc(a.plaid.institution) + ')' : '') + ', so its balance updates on its own. Plaid lists it as ' + KIND_ONE[plaidKind(a.plaid)].toLowerCase() + '. ' : 'Not linked, so enter the balance yourself and update it now and then. For a card or loan, enter what you owe. ') +
+      'Checking and savings count as cash. Credit cards and loans count as money owed, and bills charged to them don\'t need a transfer.</div>' +
+      (a && manual && state.accounts[acctKey(a.name)] ? '<button type="button" class="btn danger" data-act="del-acct" data-name="' + esc(a.name) + '">Remove account</button>' : '');
+    openSheet(a ? 'Account' : 'New account', body, { saveLabel: 'Save', onSave: function (fd) {
+      var nm = a ? a.name : String(fd.get('name') || '').trim(); if (!nm) { toast('Add a name for the account.'); return false; }
+      var raw = fd.has('balance') ? String(fd.get('balance') || '').trim() : '', bal = raw ? num(raw) : null;
+      if (raw && isNaN(bal)) { toast('Enter a balance like 1250.00.'); return false; }
+      var cur = state.accounts[acctKey(nm)] || { name: nm };
+      cur.kind = String(fd.get('kind')); cur.hidden = !!fd.get('hidden');
+      if (manual) { if (bal !== (cur.balance != null ? cur.balance : null)) cur.balanceAt = new Date().toISOString(); cur.balance = bal != null ? Math.round(bal * 100) / 100 : null; }
+      state.accounts[acctKey(nm)] = cur;
+      linkCards(); render(); save(a ? 'Account updated' : 'Account added');
+    } });
   }
   function extraCard(c, M) {
     if (c.extraDone) {
@@ -1001,7 +1064,7 @@ button.row:active { background: var(--surface-2); }
       var i = order.indexOf(d), start = +d.startBalance || +d.balance, prog = start > 0 ? Math.max(0, Math.min(1, (start - d.balance) / start)) : 1;
       var free = P.done[d.id];
       h += '<button class="card" style="border:0;text-align:left;width:100%" data-act="edit-debt" data-id="' + d.id + '"><span class="card-top"><span><span class="headline" style="display:block">' + esc(d.name) + '</span>' +
-        '<span class="sub muted" style="display:block">' + (+d.apr || 0) + '% APR · ' + money(+d.minimum || 0) + ' min on the ' + ord(+d.dueDay || 1) + (d.card ? ' · balance from card' : '') + '</span></span>' +
+        '<span class="sub muted" style="display:block">' + (+d.apr || 0) + '% APR · ' + money(+d.minimum || 0) + ' min on the ' + ord(+d.dueDay || 1) + (d.card ? ' · balance from ' + (kindOfName(d.card) === 'loan' ? 'loan' : 'card') : '') + '</span></span>' +
         (i < 0 ? badge('paid', 'Paid off') : badge('debt', i === 0 ? 'Pay first' : '#' + (i + 1))) + '</span>' +
         '<span style="display:flex;align-items:baseline;gap:4px"><span class="title num">' + money(Math.max(0, +d.balance)) + '</span><span class="sub muted">left</span></span>' +
         '<span class="progress debt" role="progressbar" aria-label="Paid off so far" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(prog * 100) + '" style="display:block"><div style="width:' + (prog * 100) + '%"></div></span>' +
@@ -1301,12 +1364,12 @@ button.row:active { background: var(--surface-2); }
       '<div class="field"><label for="d-match">On bank statement</label><input id="d-match" name="match" placeholder="Optional" value="' + esc(d.match || '') + '" maxlength="80"></div>' +
       accountField('d-acct', d.account, 'Pays from', id ? accountFor(d) || 'Optional' : 'Optional') +
       (function () {
-        var cards = plaidBalances().filter(function (b) { return b.type === 'credit'; }); if (!cards.length) return '';
-        return '<div class="field"><label for="d-card">Linked card</label><select id="d-card" name="card"><option value="">None</option>' + cards.map(function (c) {
-          return '<option value="' + esc(c.name) + '"' + (sameAcct(c.name, d.card) ? ' selected' : '') + '>' + esc(c.name) + (c.current != null ? ' · ' + money(+c.current) : '') + '</option>';
+        var cards = allAccounts().filter(function (a) { return isOwed(a.kind); }); if (!cards.length) return '';
+        return '<div class="field"><label for="d-card">Linked account</label><select id="d-card" name="card"><option value="">None</option>' + cards.map(function (c) {
+          return '<option value="' + esc(c.name) + '"' + (sameAcct(c.name, d.card) ? ' selected' : '') + '>' + esc(c.name) + (c.balance != null ? ' · ' + money(c.balance) : '') + '</option>';
         }).join('') + '</select></div>';
       })() + '</div>' +
-      '<div class="section-foot">Starting balance is what you owed when you began tracking. It\'s used to show progress. With a linked card, the balance updates from the card itself.</div>' +
+      '<div class="section-foot">Starting balance is what you owed when you began tracking. It\'s used to show progress. With a linked account, the balance comes from that card or loan.</div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-debt" data-id="' + id + '">Delete debt</button>' : '');
     openSheet(id ? 'Edit debt' : 'New debt', body, { saveLabel: 'Save', onSave: function (fd) {
       var bal = num(fd.get('balance')), apr = num(fd.get('apr')), min = num(fd.get('minimum')), day = parseInt(fd.get('day'), 10), start = num(fd.get('start')), name = String(fd.get('name') || '').trim();
@@ -1373,6 +1436,9 @@ button.row:active { background: var(--surface-2); }
     if (a === 'close') { closeSheet(); return; }
     if (a === 'pay-prev') { payOffset--; render(); return; }
     if (a === 'bal-refresh') { refreshBalances(false); return; }
+    if (a === 'acct') { accountSheet(t.dataset.name); return; }
+    if (a === 'acct-add') { accountSheet(null); return; }
+    if (a === 'del-acct') { delete state.accounts[acctKey(t.dataset.name)]; closeSheet(); render(); save('Account removed'); return; }
     if (a === 'pay-go') { payOffset = +t.dataset.off || 0; render(); return; }
     if (a === 'pay-next') { payOffset++; render(); return; }
     if (a === 'item') { itemSheet(key); return; }
