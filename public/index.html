@@ -814,7 +814,10 @@ button.row:active { background: var(--surface-2); }
     payOffset = Math.max(minOff, Math.min(maxOff, payOffset));
     var c = M.checks[M.cur + payOffset];
     var name = payOffset === 0 ? 'This paycheck' : payOffset === 1 ? 'Next paycheck' : payOffset < 0 ? 'Past paycheck' : 'Coming paycheck';
-    var short = c.spendable < -0.004;
+    var R = payOffset === 0 ? realityFor(c) : null;
+    // Only suggest extra debt payments from money that's actually in checking.
+    if (R && !c.extraDone) { c.realLimited = R.free < c.suggested; c.suggested = Math.max(0, Math.min(c.suggested, Math.floor(R.free))); }
+    var short = (R ? R.free : c.spendable) < -0.004;
     var used = c.assigned + (c.extraDone ? c.extraDone.amount : 0) + c.reserve - c.coveredIn;
     var share = c.amount > 0 ? Math.max(0, Math.min(1, used / c.amount)) : (used > 0 ? 1 : 0);
     var groups = [['Needs attention', c.items.filter(function (i) { return i.status === 'late' || i.status === 'due'; })],
@@ -822,12 +825,14 @@ button.row:active { background: var(--surface-2); }
       ['Paid', c.items.filter(function (i) { return i.status === 'paid'; })]];
     var h = '<div class="head"><h1 class="large-title">' + name + '</h1><div class="sub muted">' + fmtDay(c.date) + ' to ' + fmtShort(c.end) + '</div></div>' + banners() +
       balancesCard() + payChips(M, minOff, maxOff) +
-      '<section class="card hero" aria-label="Paycheck summary"><div class="card-top"><div><div class="foot muted">' + (short ? 'Short after bills' : state.budget.length ? 'Left after bills and budget' : 'Left to spend') + '</div>' +
-      '<div class="amount-hero' + (short ? ' short' : '') + '">' + money(c.spendable, true) + '</div></div>' + (short ? badge('late', 'Short') : '') + '</div>' +
+      '<section class="card hero" aria-label="Paycheck summary"><div class="card-top"><div><div class="foot muted">' + (R ? (short ? 'Short right now' : 'Free to spend right now') : short ? 'Short after bills' : state.budget.length ? 'Left after bills and budget' : 'Left to spend') + '</div>' +
+      '<div class="amount-hero' + (short ? ' short' : '') + '">' + money(R ? (short ? -R.free : R.free) : c.spendable, true) + '</div></div>' + (short ? badge('late', 'Short') : '') + '</div>' +
+      (R ? '<div class="sub muted">From your real checking balance. The plan for this paycheck says ' + money(c.spendable) + '.</div>' : '') +
       '<div class="progress' + (short ? ' late' : '') + '" role="progressbar" aria-label="Share of paycheck already assigned" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(share * 100) + '"><div style="width:' + (share * 100) + '%"></div></div>' +
       '<div class="meta"><span>' + money(c.assigned) + ' to ' + c.items.length + (c.items.length === 1 ? ' bill' : ' bills') + (c.reserve > 0.004 ? ' + ' + money(c.reserve) + ' set aside' : '') + (c.extraDone ? ' + ' + money(c.extraDone.amount) + ' extra' : '') + (c.coveredIn > 0.004 ? ' · ' + money(c.coveredIn) + ' carried in' : '') + '</span>' +
       '<button class="linkbtn" data-act="edit-amount" data-date="' + c.date + '">' + money(c.amount) + ' paycheck' + (c.custom ? ' (edited)' : '') + '</button></div></section>';
-    h += ledger(c, M);
+    if (R) h += realityCard(c, R);
+    h += ledger(c, M, !!R);
     var toSort = state.budget.length ? monthSpend(ymOf(0)).unsorted.length : 0;
     if (toSort) h += '<div class="banner"><p>' + toSort + (toSort === 1 ? ' purchase this month isn\'t' : ' purchases this month aren\'t') + ' in a budget bucket yet.</p><button data-act="go-sort">Sort purchases</button></div>';
     var pm = pendingMatches();
@@ -905,7 +910,41 @@ button.row:active { background: var(--surface-2); }
     return '<div class="chips" role="group" aria-label="Paychecks">' + h + '</div>';
   }
   // The numbers for one paycheck, top to bottom, ending in what's left over.
-  function ledger(c, M) {
+  // The current paycheck measured against what's really in checking, not just the plan.
+  function realityFor(c) {
+    var accts = allAccounts().filter(function (a) { return a.kind === 'checking' && !a.hidden && a.plaid && a.balance != null; });
+    if (!accts.length) return null;
+    var inAcct = function (t) { return accts.some(function (a) { return sameAcct(a.name, t.account_name); }); };
+    var now = accts.reduce(function (s, a) { return s + a.balance; }, 0), linked = linkedMap(), spent = 0, inn = 0, out = 0;
+    // Bills charged to a card or loan don't come out of checking.
+    var due = c.items.filter(function (it) { return it.status !== 'paid' && !isOwed(kindOfName(accountFor(it.src))); }).reduce(function (s, it) { return s + it.amount; }, 0);
+    txns.forEach(function (t) {
+      if (t.date < c.date || t.date > TODAY) return;
+      if (counts(t, linked)) { var r = bucketFor(t); if (r && r.id !== 'none') spent += t.amount; }
+      if (inAcct(t)) { if (t.amount < 0) inn -= t.amount; else out += t.amount; }
+    });
+    var budgetLeft = Math.max(0, c.budget - spent), buf = +state.settings.buffer || 0;
+    return { accts: accts, now: now, due: due, reserve: c.reserve, budgetLeft: budgetLeft, spent: spent, buf: buf,
+      free: now - due - c.reserve - budgetLeft - buf, start: now - inn + out, inn: inn, out: out };
+  }
+  function realityCard(c, R) {
+    var row = function (l, v, cls) { return '<div' + (cls ? ' class="' + cls + '"' : '') + '><span>' + l + '</span><span>' + v + '</span></div>'; };
+    var nextPay = addDays(c.end, 1);
+    return '<section class="card"><div class="headline">Checking right now</div><div class="sub muted">' + esc(R.accts.map(function (a) { return a.name; }).join(' + ')) + '</div><div class="ledger">' +
+      row('In checking now', money(R.now)) +
+      (R.due > 0.004 ? row('Bills still due by ' + fmtShort(c.end), '&minus;' + money(R.due)) : '') +
+      (R.reserve > 0.004 ? row('Save for your ' + fmtShort(c.reserveFor || nextPay) + ' paycheck', '&minus;' + money(R.reserve)) : '') +
+      (R.budgetLeft > 0.004 ? row('Budget left this paycheck', '&minus;' + money(R.budgetLeft)) : '') +
+      (R.buf > 0.004 ? row('Spending money', '&minus;' + money(R.buf)) : '') +
+      row(R.free < -0.004 ? 'Short' : 'Free to spend', money(R.free), 'total' + (R.free < -0.004 ? ' short' : '')) + '</div>' +
+      '<div class="headline" style="margin-top:8px">How you got here</div><div class="ledger">' +
+      row('In checking on ' + fmtShort(c.date), money(R.start)) +
+      row('Money in since then', '+' + money(R.inn)) +
+      row('Money out since then', '&minus;' + money(R.out)) +
+      row('In checking now', money(R.now), 'total') + '</div>' +
+      '<div class="sub muted">' + (R.free < -0.004 ? 'More went out than the plan expected. ' : '') + 'The list at the bottom, What came out, shows every transaction since ' + fmtShort(c.date) + '. Budget spent this paycheck: ' + money(R.spent) + ' of ' + money(c.budget) + '.</div></section>';
+  }
+  function ledger(c, M, planOnly) {
     var bills = 0, mins = 0, buf = +state.settings.buffer || 0;
     c.items.forEach(function (it) { if (it.kind === 'debt') mins += it.amount; else bills += it.amount; });
     var extra = c.extraDone ? c.extraDone.amount : c.suggested;
@@ -922,7 +961,7 @@ button.row:active { background: var(--surface-2); }
     if (buf > 0.004) h += row('Spending money', out(buf));
     if (extra > 0.004) h += row('Extra to ' + esc(extraTo || 'debt'), out(extra));
     h += row(left < -0.004 ? 'Short' : 'Left over', money(left), 'total' + (left < -0.004 ? ' short' : ''));
-    return '<section class="card"><div class="headline">Where this paycheck goes</div><div class="ledger">' + h + '</div></section>';
+    return '<section class="card"><div class="headline">' + (planOnly ? 'The plan for this paycheck' : 'Where this paycheck goes') + '</div><div class="ledger">' + h + '</div></section>';
   }
   // What comes out of each account from this paycheck, and what to move there from the account your pay lands in.
   function accountSplit(c, M) {
@@ -1032,8 +1071,9 @@ button.row:active { background: var(--surface-2); }
         '<button class="btn tinted" data-act="undo-extra" data-date="' + c.date + '">Undo</button></section>';
     }
     if (!M.target) return state.debts.length ? '<section class="card"><div class="headline">No debt left</div><div class="sub muted">Every balance is at zero. What\'s left is yours.</div></section>' : '';
+    if (c.suggested < 1 && c.realLimited) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Not right now. What\'s in checking has to cover the bills and savings above first. Minimums still keep you on track.</div></section>';
     if (c.suggested < 1) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Nothing extra this paycheck after bills and your ' + money(+state.settings.buffer || 0) + ' spending money. Minimums still keep you on track.</div></section>';
-    return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + money(c.suggested) + ' toward ' + esc(M.target.name) + (M.target.apr ? ' (' + M.target.apr + '% APR)' : '') + '. You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div></div>' + badge('debt', 'Pay first') + '</div>' +
+    return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + money(c.suggested) + ' toward ' + esc(M.target.name) + (M.target.apr ? ' (' + M.target.apr + '% APR)' : '') + '.' + (c.realLimited ? ' That\'s what your checking balance can spare right now.' : '') + ' You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div></div>' + badge('debt', 'Pay first') + '</div>' +
       '<button class="btn filled" data-act="do-extra" data-date="' + c.date + '">Mark ' + money(c.suggested) + ' paid</button></section>';
   }
   var billsMode = 'bills';
