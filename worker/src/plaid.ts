@@ -61,30 +61,32 @@ function toBalance(a: PlaidAccount, live: boolean): Balance {
  * which may not be on your plan, so it falls back to the balances on file.
  */
 async function fetchAccounts(env: Env, token: string, live = false) {
-  let r: { accounts: PlaidAccount[] } | null = null, wasLive = false;
+  let r: { accounts: PlaidAccount[] } | null = null, wasLive = false, liveError: string | null = null;
   if (live) {
-    try { r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/balance/get', { access_token: token }); wasLive = true; } catch { r = null; }
+    try { r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/balance/get', { access_token: token }); wasLive = true; }
+    catch (err: any) { r = null; liveError = `${err?.code || 'ERROR'}: ${err?.message || 'Live balance check failed.'}`; }
   }
   if (!r) r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/get', { access_token: token });
   const accounts: Record<string, string> = {}, balances: Record<string, Balance> = {};
   for (const a of r.accounts) { accounts[a.account_id] = accountLabel(a); balances[a.account_id] = toBalance(a, wasLive); }
-  return { accounts, balances };
+  return { accounts, balances, liveError };
 }
 
 /** Fresh balances for every connection. Transactions are left alone. */
-export async function refreshBalances(env: Env): Promise<{ errors: { institution: string; message: string }[] }> {
+export async function refreshBalances(env: Env): Promise<{ errors: { institution: string; message: string }[]; liveErrors: { institution: string; message: string }[] }> {
   const { results: items } = await env.DB.prepare('SELECT item_id, institution_name, access_token_enc, accounts FROM plaid_items').all<ItemRow>();
-  const errors: { institution: string; message: string }[] = [];
+  const errors: { institution: string; message: string }[] = [], liveErrors: { institution: string; message: string }[] = [];
   await Promise.all(items.map(async (item) => {
     try {
       const fresh = await fetchAccounts(env, await decryptSecret(env, item.access_token_enc), true);
+      if (fresh.liveError) liveErrors.push({ institution: item.institution_name, message: fresh.liveError });
       const accounts = { ...(JSON.parse(item.accounts || '{}') as Record<string, string>), ...fresh.accounts };
       await env.DB.prepare('UPDATE plaid_items SET accounts = ?1, balances = ?2 WHERE item_id = ?3').bind(JSON.stringify(accounts), JSON.stringify(fresh.balances), item.item_id).run();
     } catch (err: any) {
       errors.push({ institution: item.institution_name, message: err?.message || 'Could not get balances.' });
     }
   }));
-  return { errors };
+  return { errors, liveErrors };
 }
 
 export async function listItems(env: Env) {

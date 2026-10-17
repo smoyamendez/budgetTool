@@ -387,14 +387,14 @@ button.row:active { background: var(--surface-2); }
   // Ask the banks for balances right now. Opening the Accounts tab does this when they're over an hour old.
   function refreshBalances(quiet) {
     if (balState.busy || !plaid.items.length) return;
-    balState.busy = true; balState.tried = Date.now(); if (tab === 'accounts' && !sheetOpen()) render();
+    balState.busy = true; balState.tried = Date.now(); if ((tab === 'accounts' || tab === 'home') && !sheetOpen()) render();
     api('POST', '/api/plaid/balances').then(function (r) {
-      plaid.items = r.items || plaid.items; balState.busy = false;
+      plaid.items = r.items || plaid.items; plaid.liveErrors = r.liveErrors || []; balState.busy = false;
       var changed = linkCards();
-      if (tab === 'accounts' && !sheetOpen()) render(); else if (changed && !sheetOpen()) render();
+      if ((tab === 'accounts' || tab === 'home' || changed) && !sheetOpen()) render();
       if (changed) save();
       if (r.errors && r.errors.length) toast(r.errors[0].institution + ': ' + r.errors[0].message); else if (!quiet) toast('Balances updated');
-    }).catch(function (e) { balState.busy = false; if (tab === 'accounts' && !sheetOpen()) render(); if (!quiet && !e.signedOut) toast(e.message || "Couldn't update balances."); });
+    }).catch(function (e) { balState.busy = false; if ((tab === 'accounts' || tab === 'home') && !sheetOpen()) render(); if (!quiet && !e.signedOut) toast(e.message || "Couldn't update balances."); });
   }
   // ---------- account types ----------
   var KINDS = [['checking', 'Checking'], ['savings', 'Savings'], ['credit', 'Credit cards'], ['loan', 'Loans']];
@@ -424,6 +424,33 @@ button.row:active { background: var(--surface-2); }
       } else { a.balance = m.balance != null ? +m.balance : null; a.current = a.balance; a.asOf = m.balanceAt || null; }
     });
     return out;
+  }
+  // Balances older than 15 minutes get refreshed when you look at them. Failed tries wait 5 minutes.
+  function freshenBalances() {
+    if (plaid.items.length && !balState.busy && balanceAge() > 900e3 && Date.now() - balState.tried > 300e3) setTimeout(function () { refreshBalances(true); }, 0);
+  }
+  function ago(isoStr) {
+    var m = Math.round((Date.now() - Date.parse(isoStr)) / 60000);
+    return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 24 * 60 ? Math.round(m / 60) + ' hr ago' : fmtStamp(isoStr);
+  }
+  // Current balances at the top of the Paycheck screen.
+  function balancesCard() {
+    if (!plaid.items.length) return '';
+    freshenBalances();
+    var accts = allAccounts().filter(function (a) { return !a.hidden && a.balance != null; });
+    var cash = accts.filter(function (a) { return !isOwed(a.kind); }), cards = accts.filter(function (a) { return a.kind === 'credit'; }), loans = accts.filter(function (a) { return a.kind === 'loan'; });
+    var sum = function (l) { return l.reduce(function (s, a) { return s + a.balance; }, 0); };
+    var bals = plaidBalances(), asOf = bals.map(function (b) { return b.as_of; }).filter(Boolean).sort()[0], live = bals.length && bals.every(function (b) { return b.live; });
+    var row = function (l, v, cls) { return '<div' + (cls ? ' class="' + cls + '"' : '') + '><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + l + '</span><span>' + v + '</span></div>'; };
+    var h = '<section class="card"><div class="card-top"><div><div class="headline">Balances now</div><div class="sub muted">' + (balState.busy ? 'Checking your banks…' : asOf ? (live ? 'Live from your banks, ' : 'From Plaid, updated ') + ago(asOf) : 'Not checked yet') + '</div></div>' +
+      '<button class="linkbtn" data-act="bal-refresh"' + (balState.busy ? ' disabled' : '') + '>Refresh</button></div>';
+    if (!accts.length) return h + '<div class="sub muted">No balances yet. Tap Refresh.</div></section>';
+    h += '<div class="ledger">' + cash.map(function (a) { return row(esc(a.name), money(a.balance)); }).join('') +
+      (cash.length > 1 ? row('Cash total', money(sum(cash)), 'total') : '') +
+      (cards.length ? row('Owed on ' + cards.length + (cards.length === 1 ? ' card' : ' cards'), money(sum(cards))) : '') +
+      (loans.length ? row('Owed on ' + loans.length + (loans.length === 1 ? ' loan' : ' loans'), money(sum(loans))) : '') + '</div>' +
+      '<button class="linkbtn" data-tab="accounts" style="align-self:flex-start">See what\'s due from each account</button></section>';
+    return h;
   }
   var CARD_ALIAS = { amex: 'american express', citi: 'citi', discover: 'discover', apple: 'apple', applecard: 'apple', chase: 'chase', capital: 'capital one' };
   // Debts linked to a Plaid card take that card's balance. A debt whose name points at exactly one linked card gets linked once on its own.
@@ -794,7 +821,7 @@ button.row:active { background: var(--surface-2); }
       ['Coming up', c.items.filter(function (i) { return i.status === 'upcoming'; })],
       ['Paid', c.items.filter(function (i) { return i.status === 'paid'; })]];
     var h = '<div class="head"><h1 class="large-title">' + name + '</h1><div class="sub muted">' + fmtDay(c.date) + ' to ' + fmtShort(c.end) + '</div></div>' + banners() +
-      payChips(M, minOff, maxOff) +
+      balancesCard() + payChips(M, minOff, maxOff) +
       '<section class="card hero" aria-label="Paycheck summary"><div class="card-top"><div><div class="foot muted">' + (short ? 'Short after bills' : state.budget.length ? 'Left after bills and budget' : 'Left to spend') + '</div>' +
       '<div class="amount-hero' + (short ? ' short' : '') + '">' + money(c.spendable, true) + '</div></div>' + (short ? badge('late', 'Short') : '') + '</div>' +
       '<div class="progress' + (short ? ' late' : '') + '" role="progressbar" aria-label="Share of paycheck already assigned" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(share * 100) + '"><div style="width:' + (share * 100) + '%"></div></div>' +
@@ -924,7 +951,7 @@ button.row:active { background: var(--surface-2); }
     var M = build();
     var h = '<div class="head"><h1 class="large-title">Accounts</h1><div class="sub muted">' + (M ? 'What\'s due before your ' + fmtShort(M.checks[M.cur + 1] ? M.checks[M.cur + 1].date : addDays(M.checks[M.cur].end, 1)) + ' paycheck' : 'Your balances and what comes out of each') + '</div></div>' + banners();
     if (!M) return h + '<div class="list"><div class="empty">Set your pay schedule in Settings first.</div></div>';
-    if (plaid.items.length && !balState.busy && balanceAge() > 3600e3 && Date.now() - balState.tried > 300e3) setTimeout(function () { refreshBalances(true); }, 0);
+    freshenBalances();
     var accts = allAccounts(), home = payAccount();
     // Everything unpaid on the current paycheck, including anything overdue, grouped by the account it comes out of.
     var cur = M.checks[M.cur], groups = [];
@@ -973,7 +1000,7 @@ button.row:active { background: var(--surface-2); }
     h += '<div class="actions">' + (plaid.items.length ? '<button class="btn tinted" data-act="bal-refresh"' + (balState.busy ? ' disabled' : '') + '>' + (balState.busy ? 'Checking your banks' : 'Refresh balances') + '</button>' : '') + '<button class="btn tinted" data-act="acct-add">Add an account</button></div>';
     var bals = plaidBalances(), asOf = bals.map(function (b) { return b.as_of; }).filter(Boolean).sort()[0], live = bals.length && bals.every(function (b) { return b.live; });
     h += '<div class="section-foot">Tap an account to set its type: checking, savings, credit card or loan. ' + (!plaid.items.length ? 'Connect your banks in Settings to see balances here.' : !bals.length ? 'No balances yet. Tap Refresh balances.' :
-      (live ? 'Linked balances are live from your banks' : 'Linked balances are from Plaid\'s latest update') + (asOf ? ' as of ' + fmtStamp(asOf) : '') + '.' + (live ? '' : ' Your plan may not include live balance checks, so they can be a few hours old.')) + '</div>';
+      (live ? 'Linked balances are live from your banks' : 'Linked balances are from Plaid\'s latest update') + (asOf ? ' as of ' + fmtStamp(asOf) : '') + '.' + (live ? '' : ' They can be a few hours old.' + (plaid.liveErrors && plaid.liveErrors.length ? ' Live check: ' + esc(plaid.liveErrors[0].message) : ''))) + '</div>';
     return h;
   }
   function accountSheet(name) {
@@ -1208,7 +1235,7 @@ button.row:active { background: var(--surface-2); }
       '<div class="section"><div class="section-label">Data</div><div class="list"><button class="row plain" data-act="reset-all"><span class="row-main" style="color:var(--late)">Erase everything and start over</span></button></div></div>';
   }
   // ---------- server + Plaid ----------
-  var plaid = { loaded: false, configured: false, env: '', items: [], busy: false };
+  var plaid = { loaded: false, configured: false, env: '', items: [], busy: false, liveErrors: [] };
   var API = String(window.PAYDAY_API || '').replace(/\/+$/, '');
   var TOKEN_KEY = 'payday.token', memToken = null;
   function getToken() { try { return localStorage.getItem(TOKEN_KEY) || memToken; } catch (e) { return memToken; } }
@@ -1722,6 +1749,9 @@ button.row:active { background: var(--surface-2); }
     });
   }
   start();
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && state && (tab === 'home' || tab === 'accounts')) freshenBalances();
+  });
   window.addEventListener('pagehide', function () {
     if (!saveTimer || !docRef || !state) return;
     clearTimeout(saveTimer); saveTimer = null;
