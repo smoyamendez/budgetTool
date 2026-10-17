@@ -175,6 +175,8 @@ button.row:active { background: var(--surface-2); }
 .sheet { background: var(--bg); width: 100%; max-width: 520px; max-height: 88%; overflow-y: auto; border-radius: var(--radius-lg) var(--radius-lg) 0 0; padding-inline: var(--space-4); padding-block: var(--space-3) calc(var(--space-6) + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: var(--space-4); animation: up .25s ease; }
 @keyframes up { from { transform: translateY(24px); opacity: 0.6; } }
 @media (prefers-reduced-motion: reduce) { .sheet { animation: none; } }
+/* Long sheets scroll; without this, flex squeezes the field lists to nothing. */
+.sheet > * { flex-shrink: 0; }
 .sheet-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 44px; }
 .sheet-bar .headline { text-align: center; flex: 1; }
 .sheet-bar button { border: 0; background: none; color: var(--accent); font-size: 17px; padding: var(--space-2) 0; min-width: 64px; }
@@ -1235,7 +1237,7 @@ button.row:active { background: var(--surface-2); }
         return '<div class="field"><label for="g-c-' + k + '">' + CAT_LABEL[k] + (other ? ' <span class="muted">(' + esc(other.name) + ')</span>' : '') + '</label><input id="g-c-' + k + '" type="checkbox" name="cats" value="' + k + '"' + ((b.cats || []).indexOf(k) >= 0 ? ' checked' : '') + '></div>';
       }).join('') + '</div><div class="section-foot">Plaid\'s labels are broad: groceries and restaurants are both "Food and drink". Store names win over labels, and you can move any purchase by tapping it.</div></div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-budget" data-id="' + id + '">Delete budget item</button>' : '');
-    openSheet(id ? 'Edit budget item' : 'New budget item', body, { saveLabel: 'Save', onSave: function (fd) {
+    openSheet(id ? 'Edit bucket' : 'New bucket', body, { saveLabel: 'Save', onSave: function (fd) {
       var amt = num(fd.get('amount')), name = String(fd.get('name') || '').trim();
       if (!name || !(amt >= 0)) { toast('Add a name and a monthly amount.'); return false; }
       var v = { name: name, amount: Math.round(amt * 100) / 100, account: String(fd.get('account') || '').trim(), match: String(fd.get('match') || '').trim(), cats: fd.getAll('cats').map(String) };
@@ -1243,7 +1245,7 @@ button.row:active { background: var(--surface-2); }
       state.budget.forEach(function (x) { if (x.id !== id && x.cats) x.cats = x.cats.filter(function (c) { return v.cats.indexOf(c) < 0; }); });
       var cur = id && state.budget.find(function (x) { return x.id === id; });
       if (cur) Object.assign(cur, v); else state.budget.push(Object.assign({ id: uid() }, v));
-      render(); save(id ? 'Budget updated' : 'Budget item added');
+      render(); save(id ? 'Bucket updated' : 'Bucket added');
     } });
   }
   function debtSheet(id) {
