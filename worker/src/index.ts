@@ -1,6 +1,6 @@
 import { login, logout, logoutEverywhere, requireSession } from './auth.js';
 import { HttpError, type Env } from './env.js';
-import { createLinkToken, exchangePublicToken, listItems, plaidConfigured, removeItem, syncAll } from './plaid.js';
+import { createLinkToken, exchangePublicToken, listItems, plaidConfigured, refreshBalances, removeItem, syncAll } from './plaid.js';
 import { cleanTxn, deleteMonth, getBudget, getTxnMonths, putBudget, upsertTxns } from './store.js';
 
 const MONTH = /^\d{4}-\d{2}$/;
@@ -91,6 +91,7 @@ async function route(req: Request, env: Env, url: URL): Promise<Response> {
     return json({ ...item, sync: await syncAll(env) });
   }
   if (p === '/api/plaid/sync' && m === 'POST') return json(await syncAll(env));
+  if (p === '/api/plaid/balances' && m === 'POST') return json({ ...(await refreshBalances(env)), items: await listItems(env) });
   const itemMatch = /^\/api\/plaid\/items\/([^/]+)$/.exec(p);
   if (itemMatch && m === 'DELETE') { await removeItem(env, decodeURIComponent(itemMatch[1])); return json({ ok: true }); }
 

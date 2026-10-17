@@ -49,18 +49,42 @@ interface PlaidAccount {
   subtype?: string | null;
   balances?: { current?: number | null; available?: number | null; limit?: number | null } | null;
 }
-interface Balance { name: string; type: string; subtype: string; current: number | null; available: number | null; limit: number | null }
+interface Balance { name: string; type: string; subtype: string; current: number | null; available: number | null; limit: number | null; as_of: string; live: boolean }
 
-function toBalance(a: PlaidAccount): Balance {
-  return { name: accountLabel(a), type: a.type || '', subtype: a.subtype || '', current: a.balances?.current ?? null, available: a.balances?.available ?? null, limit: a.balances?.limit ?? null };
+function toBalance(a: PlaidAccount, live: boolean): Balance {
+  return { name: accountLabel(a), type: a.type || '', subtype: a.subtype || '', current: a.balances?.current ?? null, available: a.balances?.available ?? null, limit: a.balances?.limit ?? null, as_of: now(), live };
 }
 
-/** /accounts/get returns the balances Plaid already has on file, at no extra cost. */
-async function fetchAccounts(env: Env, token: string) {
-  const r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/get', { access_token: token });
+/**
+ * /accounts/get returns the balances Plaid already has on file, at no extra cost.
+ * With live = true, /accounts/balance/get asks the bank right now. That's Plaid's Balance product,
+ * which may not be on your plan, so it falls back to the balances on file.
+ */
+async function fetchAccounts(env: Env, token: string, live = false) {
+  let r: { accounts: PlaidAccount[] } | null = null, wasLive = false;
+  if (live) {
+    try { r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/balance/get', { access_token: token }); wasLive = true; } catch { r = null; }
+  }
+  if (!r) r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/get', { access_token: token });
   const accounts: Record<string, string> = {}, balances: Record<string, Balance> = {};
-  for (const a of r.accounts) { accounts[a.account_id] = accountLabel(a); balances[a.account_id] = toBalance(a); }
+  for (const a of r.accounts) { accounts[a.account_id] = accountLabel(a); balances[a.account_id] = toBalance(a, wasLive); }
   return { accounts, balances };
+}
+
+/** Fresh balances for every connection. Transactions are left alone. */
+export async function refreshBalances(env: Env): Promise<{ errors: { institution: string; message: string }[] }> {
+  const { results: items } = await env.DB.prepare('SELECT item_id, institution_name, access_token_enc, accounts FROM plaid_items').all<ItemRow>();
+  const errors: { institution: string; message: string }[] = [];
+  await Promise.all(items.map(async (item) => {
+    try {
+      const fresh = await fetchAccounts(env, await decryptSecret(env, item.access_token_enc), true);
+      const accounts = { ...(JSON.parse(item.accounts || '{}') as Record<string, string>), ...fresh.accounts };
+      await env.DB.prepare('UPDATE plaid_items SET accounts = ?1, balances = ?2 WHERE item_id = ?3').bind(JSON.stringify(accounts), JSON.stringify(fresh.balances), item.item_id).run();
+    } catch (err: any) {
+      errors.push({ institution: item.institution_name, message: err?.message || 'Could not get balances.' });
+    }
+  }));
+  return { errors };
 }
 
 export async function listItems(env: Env) {
