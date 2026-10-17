@@ -35,14 +35,41 @@ interface ItemRow {
   access_token_enc: string;
   institution_name: string;
   accounts: string;
+  balances: string;
   cursor: string | null;
   last_synced: string | null;
   error: string | null;
 }
 
+interface PlaidAccount {
+  account_id: string;
+  name: string;
+  mask?: string | null;
+  type?: string | null;
+  subtype?: string | null;
+  balances?: { current?: number | null; available?: number | null; limit?: number | null } | null;
+}
+interface Balance { name: string; type: string; subtype: string; current: number | null; available: number | null; limit: number | null }
+
+function toBalance(a: PlaidAccount): Balance {
+  return { name: accountLabel(a), type: a.type || '', subtype: a.subtype || '', current: a.balances?.current ?? null, available: a.balances?.available ?? null, limit: a.balances?.limit ?? null };
+}
+
+/** /accounts/get returns the balances Plaid already has on file, at no extra cost. */
+async function fetchAccounts(env: Env, token: string) {
+  const r = await call<{ accounts: PlaidAccount[] }>(env, '/accounts/get', { access_token: token });
+  const accounts: Record<string, string> = {}, balances: Record<string, Balance> = {};
+  for (const a of r.accounts) { accounts[a.account_id] = accountLabel(a); balances[a.account_id] = toBalance(a); }
+  return { accounts, balances };
+}
+
 export async function listItems(env: Env) {
-  const { results } = await env.DB.prepare('SELECT item_id, institution_name, accounts, last_synced, error FROM plaid_items ORDER BY created_at').all<Omit<ItemRow, 'access_token_enc' | 'cursor'>>();
-  return results.map((r) => ({ ...r, accounts: Object.values(JSON.parse(r.accounts || '{}') as Record<string, string>) }));
+  const { results } = await env.DB.prepare('SELECT item_id, institution_name, accounts, balances, last_synced, error FROM plaid_items ORDER BY created_at').all<Omit<ItemRow, 'access_token_enc' | 'cursor'>>();
+  return results.map((r) => ({
+    ...r,
+    accounts: Object.values(JSON.parse(r.accounts || '{}') as Record<string, string>),
+    balances: Object.values(JSON.parse(r.balances || '{}') as Record<string, Balance>),
+  }));
 }
 
 async function accessToken(env: Env, itemId: string): Promise<string> {
@@ -75,18 +102,17 @@ function accountLabel(a: { name: string; mask?: string | null }): string {
 
 export async function exchangePublicToken(env: Env, publicToken: string, institutionName?: string) {
   const ex = await call<{ access_token: string; item_id: string }>(env, '/item/public_token/exchange', { public_token: publicToken });
-  const accounts: Record<string, string> = {};
+  let accounts: Record<string, string> = {}, balances: Record<string, Balance> = {};
   try {
-    const acc = await call<{ accounts: { account_id: string; name: string; mask?: string | null }[] }>(env, '/accounts/get', { access_token: ex.access_token });
-    for (const a of acc.accounts) accounts[a.account_id] = accountLabel(a);
+    ({ accounts, balances } = await fetchAccounts(env, ex.access_token));
   } catch {
-    // Names are nice to have. Sync still works without them.
+    // Names and balances are nice to have. Sync still works without them.
   }
   await env.DB.prepare(
-    `INSERT INTO plaid_items (item_id, access_token_enc, institution_name, accounts, cursor, last_synced, error, created_at)
-     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)
-     ON CONFLICT(item_id) DO UPDATE SET access_token_enc = excluded.access_token_enc, institution_name = excluded.institution_name, accounts = excluded.accounts, error = NULL`,
-  ).bind(ex.item_id, await encryptSecret(env, ex.access_token), String(institutionName || 'Bank').slice(0, 120), JSON.stringify(accounts), now()).run();
+    `INSERT INTO plaid_items (item_id, access_token_enc, institution_name, accounts, balances, cursor, last_synced, error, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6)
+     ON CONFLICT(item_id) DO UPDATE SET access_token_enc = excluded.access_token_enc, institution_name = excluded.institution_name, accounts = excluded.accounts, balances = excluded.balances, error = NULL`,
+  ).bind(ex.item_id, await encryptSecret(env, ex.access_token), String(institutionName || 'Bank').slice(0, 120), JSON.stringify(accounts), JSON.stringify(balances), now()).run();
   return { item_id: ex.item_id, institution_name: institutionName || 'Bank' };
 }
 
@@ -179,8 +205,16 @@ export async function syncAll(env: Env): Promise<SyncResult> {
         await deleteTxns(env, removed);
         result.removed += removed.length;
         for (const t of added) if (t.pending_transaction_id) relink.set(t.pending_transaction_id, t.transaction_id);
-        await env.DB.prepare('UPDATE plaid_items SET cursor = ?1, accounts = ?2, last_synced = ?3, error = NULL WHERE item_id = ?4')
-          .bind(cursor, JSON.stringify(accounts), now(), item.item_id).run();
+        let balances = item.balances || '{}';
+        try {
+          const fresh = await fetchAccounts(env, token);
+          Object.assign(accounts, fresh.accounts);
+          balances = JSON.stringify(fresh.balances);
+        } catch {
+          // Keep the last known balances. Transactions still synced.
+        }
+        await env.DB.prepare('UPDATE plaid_items SET cursor = ?1, accounts = ?2, balances = ?3, last_synced = ?4, error = NULL WHERE item_id = ?5')
+          .bind(cursor, JSON.stringify(accounts), balances, now(), item.item_id).run();
         break;
       } catch (err: any) {
         const code = err?.code || 'UNKNOWN';

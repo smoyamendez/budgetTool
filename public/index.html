@@ -82,6 +82,17 @@ button { cursor: pointer; }
 .pager-btn { width: 44px; height: 44px; border-radius: var(--radius-pill); border: 0; background: var(--surface); color: var(--accent); display: grid; place-items: center; }
 .pager-btn:disabled { color: var(--ink-faint); cursor: default; }
 .pager-mid { text-align: center; min-width: 0; }
+.chips { display: flex; gap: var(--space-2); overflow-x: auto; scrollbar-width: none; margin-inline: calc(-1 * var(--space-4)); padding-inline: var(--space-4); }
+.chips::-webkit-scrollbar { display: none; }
+.chip { flex: none; border: 0; border-radius: var(--radius-pill); background: var(--surface); color: var(--ink); padding: 8px 14px; font-size: 15px; line-height: 20px; font-weight: 500; display: flex; flex-direction: column; align-items: center; }
+.chip small { font-size: 11px; line-height: 13px; color: var(--ink-muted); font-weight: 400; }
+.chip.on { background: var(--accent-fill); color: var(--on-accent); }
+.chip.on small { color: var(--on-accent); opacity: .85; }
+.ledger { display: flex; flex-direction: column; gap: var(--space-2); font-size: 15px; line-height: 20px; }
+.ledger div { display: flex; justify-content: space-between; gap: var(--space-3); }
+.ledger div span:last-child { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger .total { border-top: 1px solid var(--separator); padding-top: var(--space-2); font-weight: 600; }
+.ledger .short { color: var(--late); }
 
 /* cards */
 .card { background: var(--surface); border-radius: var(--radius-lg); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
@@ -154,7 +165,7 @@ button.row:active { background: var(--surface-2); }
 
 /* tab bar */
 .tabbar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-top: 1px solid var(--separator); padding-bottom: env(safe-area-inset-bottom, 0px); z-index: 10; }
-.tabbar nav { max-width: 520px; margin: 0 auto; display: grid; grid-template-columns: repeat(4, 1fr); }
+.tabbar nav { max-width: 520px; margin: 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); }
 .tab { border: 0; background: none; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0 8px; font-size: 11px; line-height: 13px; font-weight: 500; color: var(--ink-muted); }
 .tab svg { width: 26px; height: 26px; }
 .tab.on { color: var(--accent); }
@@ -216,17 +227,18 @@ button.row:active { background: var(--surface-2); }
   var state = null, docRef = null, saveTimer = null, tab = 'home', payOffset = 0, storeOk = false;
   function emptyState() {
     return { settings: { payAmount: 0, frequency: 'biweekly', nextPayDate: '', buffer: 0, strategy: 'avalanche', trackFrom: '', examples: false },
-      bills: [], debts: [], paid: {}, moves: {}, payAmounts: {}, extra: {}, reserved: {}, actuals: {}, notMatch: {} };
+      bills: [], debts: [], budget: [], paid: {}, moves: {}, payAmounts: {}, extra: {}, reserved: {}, actuals: {}, notMatch: {} };
   }
   function normalize(d) {
     var s = emptyState();
     d = d || {};
     s.settings = Object.assign(s.settings, d.settings || {});
-    ['bills', 'debts'].forEach(function (k) { if (Array.isArray(d[k])) s[k] = d[k]; });
+    ['bills', 'debts', 'budget'].forEach(function (k) { if (Array.isArray(d[k])) s[k] = d[k]; });
     ['paid', 'moves', 'payAmounts', 'extra', 'reserved', 'actuals', 'notMatch'].forEach(function (k) { if (d[k] && typeof d[k] === 'object') s[k] = Object.assign({}, d[k]); });
     Object.keys(s.paid).forEach(function (k) { var v = s.paid[k]; if (!v || typeof v !== 'object') s.paid[k] = { on: typeof v === 'string' ? v : TODAY, amount: null }; });
     s.bills = s.bills.map(function (b) { return Object.assign({}, b); });
     s.debts = s.debts.map(function (b) { return Object.assign({}, b); });
+    s.budget = s.budget.map(function (b) { return Object.assign({}, b); });
     return s;
   }
   function save(msg) {
@@ -263,9 +275,9 @@ button.row:active { background: var(--surface-2); }
     return out;
   }
   function makeSources(allDebts) {
-    return state.bills.map(function (b) { return { kind: 'bill', id: b.id, name: b.name, amount: +b.amount || 0, dueDay: +b.dueDay || 1, essential: !!b.essential, variable: !!b.variable, match: b.match || '' }; })
+    return state.bills.map(function (b) { return { kind: 'bill', id: b.id, name: b.name, amount: +b.amount || 0, dueDay: +b.dueDay || 1, essential: !!b.essential, variable: !!b.variable, match: b.match || '', account: b.account || '' }; })
       .concat(state.debts.filter(function (d) { return (allDebts || d.balance > 0.004) && d.minimum > 0; }).map(function (d) {
-        return { kind: 'debt', id: d.id, name: d.name, amount: d.balance > 0.004 ? Math.min(+d.minimum, +d.balance) : +d.minimum, dueDay: +d.dueDay || 1, essential: true, match: d.match || '', balance: +d.balance };
+        return { kind: 'debt', id: d.id, name: d.name, amount: d.balance > 0.004 ? Math.min(+d.minimum, +d.balance) : +d.minimum, dueDay: +d.dueDay || 1, essential: true, match: d.match || '', balance: +d.balance, account: d.account || '' };
       }));
   }
   function itemFor(src, due) {
@@ -325,6 +337,53 @@ button.row:active { background: var(--surface-2); }
     if (t.merchant_name) return String(t.merchant_name).slice(0, 80);
     var n = String(t.name || '').replace(/^(MOBILE PURCHASE|PURCHASE|CHECKCARD)(\s+\d{4})?\s+/i, '').split(/\s+DES:|\s+ID:|\s+#|\s+X{3,}|\s+\d{3,}/)[0].trim();
     return n.length >= 3 ? n.slice(0, 80) : '';
+  }
+
+  // ---------- accounts ----------
+  function plaidBalances() {
+    var out = [];
+    plaid.items.forEach(function (i) { (i.balances || []).forEach(function (b) { out.push(Object.assign({ institution: i.institution_name, synced: i.last_synced }, b)); }); });
+    return out;
+  }
+  function sameAcct(a, b) { return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase(); }
+  function accountNames() {
+    var out = [];
+    var add = function (n) { n = String(n || '').trim(); if (n && !out.some(function (x) { return sameAcct(x, n); })) out.push(n); };
+    plaidBalances().forEach(function (b) { add(b.name); });
+    txns.forEach(function (t) { add(t.account_name); });
+    state.bills.concat(state.debts, state.budget).forEach(function (x) { add(x.account); });
+    add(state.settings.payAccount);
+    return out;
+  }
+  // Where your paycheck lands: what you chose in Settings, else the account with the biggest deposits.
+  function payAccount() {
+    if (state.settings.payAccount) return state.settings.payAccount;
+    var tot = {}, best = '';
+    var cards = plaidBalances().filter(function (b) { return b.type === 'credit'; });
+    txns.forEach(function (t) {
+      if (!(t.amount < -500) || !t.account_name || /payment|thank you|autopay|transfer/i.test(t.name || '')) return;
+      if (cards.some(function (b) { return sameAcct(b.name, t.account_name); })) return;
+      tot[t.account_name] = (tot[t.account_name] || 0) - t.amount;
+    });
+    Object.keys(tot).forEach(function (k) { if (!best || tot[k] > tot[best]) best = k; });
+    return best;
+  }
+  // Where a bill is paid from: what you chose, else the account its last linked or matching payment came from.
+  var guessCache = null;
+  function accountFor(src) {
+    if (src.account) return src.account;
+    guessCache = guessCache || {};
+    if (!(src.id in guessCache)) {
+      var name = '', keys = Object.keys(state.paid).filter(function (k) { return k.indexOf(src.id + '@') === 0 && state.paid[k].txn && txnById[state.paid[k].txn]; }).sort();
+      if (keys.length) name = txnById[state.paid[keys[keys.length - 1]].txn].account_name || '';
+      else { var it = { src: src, name: src.name }, t = txns.find(function (x) { return x.amount > 0 && nameHit(it, x); }); if (t) name = t.account_name || ''; }
+      guessCache[src.id] = name;
+    }
+    return guessCache[src.id] || payAccount();
+  }
+  function accountField(id, val, label, hint) {
+    return '<div class="field"><label for="' + id + '">' + label + '</label><input id="' + id + '" name="account" list="' + id + '-list" placeholder="' + esc(hint || 'Optional') + '" value="' + esc(val || '') + '" maxlength="60" autocomplete="off">' +
+      '<datalist id="' + id + '-list">' + accountNames().map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist></div>';
   }
   function pendingMatches() { var M = build(), out = [], used = {}; if (!M) return out; M.checks.forEach(function (c) { c.items.forEach(function (it) { if (it.match && !used[it.match.transaction_id]) { used[it.match.transaction_id] = 1; out.push(it); } }); }); return out; }
   function debtById(id) { return state.debts.find(function (x) { return x.id === id; }); }
@@ -477,7 +536,8 @@ button.row:active { background: var(--surface-2); }
       c.items.sort(function (a, b) { return rank[a.status] - rank[b.status] || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || (a.kind === 'debt' ? 1 : -1); });
       c.assigned = c.items.reduce(function (s, it) { return s + it.amount; }, 0);
       c.extraDone = state.extra[c.date] || null;
-      c.left = c.amount - c.assigned - (c.extraDone ? c.extraDone.amount : 0);
+      c.budget = budgetPerCheck();
+      c.left = c.amount - c.assigned - c.budget - (c.extraDone ? c.extraDone.amount : 0);
     });
     // Look ahead: a later paycheck that can't cover its bills pulls money back from the one before it.
     for (var i = checks.length - 1; i >= 0; i--) {
@@ -498,9 +558,12 @@ button.row:active { background: var(--surface-2); }
     });
     return { pays: pays, cur: cur, checks: checks, target: target, order: order };
   }
+  function budgetMonthly() { return state.budget.reduce(function (s, b) { return s + (+b.amount || 0); }, 0); }
+  // Undated monthly spending is split evenly across paychecks: a $600 grocery budget is about $277 from each biweekly check.
+  function budgetPerCheck() { return Math.round(budgetMonthly() / (PER_MONTH[state.settings.frequency] || 1) * 100) / 100; }
   function projection() {
     var S = state.settings, ppm = PER_MONTH[S.frequency] || 1;
-    var billsM = state.bills.reduce(function (s, b) { return s + (+b.amount || 0); }, 0);
+    var billsM = state.bills.reduce(function (s, b) { return s + (+b.amount || 0); }, 0) + budgetMonthly();
     var live = state.debts.filter(function (d) { return d.balance > 0.004; });
     var minsM = live.reduce(function (s, d) { return s + Math.min(+d.minimum || 0, d.balance); }, 0);
     var extraM = Math.max(0, (+S.payAmount || 0) * ppm - billsM - minsM - (+S.buffer || 0) * ppm);
@@ -525,13 +588,14 @@ button.row:active { background: var(--surface-2); }
   var I = {
     home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2.5"/><circle cx="12" cy="12" r="2.6"/><path d="M6.5 9.5v5M17.5 9.5v5"/></svg>',
     bills: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8.5 3v4M15.5 3v4M8 13.5h3M8 16.5h6"/></svg>',
+    accounts: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 9.5L12 4l8.5 5.5"/><path d="M5 10v7M9.5 10v7M14.5 10v7M19 10v7"/><path d="M3.5 19.5h17"/></svg>',
     debt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19h16"/><path d="M6 15.5l4-4 3 3 5-6"/><path d="M14.5 8.5H18V12"/></svg>',
     settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>',
     left: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
     right: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>',
     chev: '<svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>'
   };
-  var TABS = [['home', 'Paycheck'], ['bills', 'Bills'], ['debt', 'Debt'], ['settings', 'Settings']];
+  var TABS = [['home', 'Paycheck'], ['bills', 'Bills'], ['debt', 'Debt'], ['accounts', 'Accounts'], ['settings', 'Settings']];
   function renderTabs() {
     document.getElementById('tabs').innerHTML = TABS.map(function (t) {
       return '<button class="tab' + (tab === t[0] ? ' on' : '') + '" data-tab="' + t[0] + '" aria-current="' + (tab === t[0] ? 'page' : 'false') + '">' + I[t[0]] + '<span>' + t[1] + '</span></button>';
@@ -591,14 +655,13 @@ button.row:active { background: var(--surface-2); }
       ['Coming up', c.items.filter(function (i) { return i.status === 'upcoming'; })],
       ['Paid', c.items.filter(function (i) { return i.status === 'paid'; })]];
     var h = '<div class="head"><h1 class="large-title">' + name + '</h1><div class="sub muted">' + fmtDay(c.date) + ' to ' + fmtShort(c.end) + '</div></div>' + banners() +
-      '<div class="pager"><button class="pager-btn" data-act="pay-prev" aria-label="Previous paycheck"' + (payOffset <= minOff ? ' disabled' : '') + '>' + I.left + '</button>' +
-      '<div class="pager-mid foot muted">' + (payOffset === 0 ? 'Paid ' + fmtShort(c.date) : (payOffset > 0 ? 'Arrives ' : 'Paid ') + fmtDay(c.date)) + '</div>' +
-      '<button class="pager-btn" data-act="pay-next" aria-label="Next paycheck"' + (payOffset >= maxOff ? ' disabled' : '') + '>' + I.right + '</button></div>' +
-      '<section class="card hero" aria-label="Paycheck summary"><div class="card-top"><div><div class="foot muted">' + (short ? 'Short after bills' : 'Left to spend') + '</div>' +
+      payChips(M, minOff, maxOff) +
+      '<section class="card hero" aria-label="Paycheck summary"><div class="card-top"><div><div class="foot muted">' + (short ? 'Short after bills' : state.budget.length ? 'Left after bills and budget' : 'Left to spend') + '</div>' +
       '<div class="amount-hero' + (short ? ' short' : '') + '">' + money(c.spendable, true) + '</div></div>' + (short ? badge('late', 'Short') : '') + '</div>' +
       '<div class="progress' + (short ? ' late' : '') + '" role="progressbar" aria-label="Share of paycheck already assigned" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(share * 100) + '"><div style="width:' + (share * 100) + '%"></div></div>' +
       '<div class="meta"><span>' + money(c.assigned) + ' to ' + c.items.length + (c.items.length === 1 ? ' bill' : ' bills') + (c.reserve > 0.004 ? ' + ' + money(c.reserve) + ' set aside' : '') + (c.extraDone ? ' + ' + money(c.extraDone.amount) + ' extra' : '') + (c.coveredIn > 0.004 ? ' · ' + money(c.coveredIn) + ' carried in' : '') + '</span>' +
       '<button class="linkbtn" data-act="edit-amount" data-date="' + c.date + '">' + money(c.amount) + ' paycheck' + (c.custom ? ' (edited)' : '') + '</button></div></section>';
+    h += ledger(c, M);
     var pm = pendingMatches();
     if (pm.length) h += '<div class="banner"><p>' + (pm.length === 1 ? '1 bank payment looks like one of your bills.' : pm.length + ' bank payments look like your bills.') + ' Link them to record what you actually paid.</p><button data-act="review">Review matches</button></div>';
     var ests = c.items.filter(function (i) { return i.estimated; });
@@ -614,7 +677,105 @@ button.row:active { background: var(--surface-2); }
       if (!g[1].length) return;
       h += '<div class="section"><div class="section-label">' + g[0] + '</div><div class="list" role="list">' + g[1].map(itemRow).join('') + '</div></div>';
     });
+    if (state.budget.length) {
+      var ppm = PER_MONTH[state.settings.frequency] || 1;
+      h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>Monthly budget</span><span class="num">' + money(c.budget) + '</span></div><div class="list" role="list">' +
+        state.budget.map(function (b) { return '<button class="row plain" data-act="edit-budget" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + money(+b.amount) + ' a month</span></span><span class="row-amount">' + money((+b.amount || 0) / ppm) + '</span></button>'; }).join('') +
+        '</div></div>';
+    }
     h += extraCard(c, M);
+    h += accountSplit(c, M);
+    return h;
+  }
+  function payChips(M, minOff, maxOff) {
+    var h = '';
+    for (var o = minOff; o <= maxOff; o++) {
+      var ck = M.checks[M.cur + o], tag = o === 0 ? 'Now' : o === 1 ? 'Next' : o < 0 ? 'Past' : '';
+      h += '<button class="chip' + (o === payOffset ? ' on' : '') + '" data-act="pay-go" data-off="' + o + '" aria-pressed="' + (o === payOffset) + '">' + fmtShort(ck.date) + (tag ? '<small>' + tag + '</small>' : '<small>&nbsp;</small>') + '</button>';
+    }
+    return '<div class="chips" role="group" aria-label="Paychecks">' + h + '</div>';
+  }
+  // The numbers for one paycheck, top to bottom, ending in what's left over.
+  function ledger(c, M) {
+    var bills = 0, mins = 0, buf = +state.settings.buffer || 0;
+    c.items.forEach(function (it) { if (it.kind === 'debt') mins += it.amount; else bills += it.amount; });
+    var extra = c.extraDone ? c.extraDone.amount : c.suggested;
+    var extraTo = c.extraDone ? (debtById(c.extraDone.debtId) || {}).name : M.target && M.target.name;
+    var left = c.spendable - buf - (c.extraDone ? 0 : c.suggested);
+    var row = function (l, v, cls) { return '<div' + (cls ? ' class="' + cls + '"' : '') + '><span>' + l + '</span><span>' + v + '</span></div>'; };
+    var out = function (v) { return '&minus;' + money(v); };
+    var h = row('Paycheck', money(c.amount));
+    if (bills > 0.004) h += row('Bills', out(bills));
+    if (mins > 0.004) h += row('Card minimums', out(mins));
+    if (c.budget > 0.004) h += row('Monthly budget', out(c.budget));
+    if (c.coveredIn > 0.004) h += row('Saved from ' + fmtShort(c.coveredFrom) + ' paycheck', '+' + money(c.coveredIn));
+    if (c.reserve > 0.004) h += row('Save for ' + fmtShort(c.reserveFor) + ' paycheck', out(c.reserve));
+    if (buf > 0.004) h += row('Spending money', out(buf));
+    if (extra > 0.004) h += row('Extra to ' + esc(extraTo || 'debt'), out(extra));
+    h += row(left < -0.004 ? 'Short' : 'Left over', money(left), 'total' + (left < -0.004 ? ' short' : ''));
+    return '<section class="card"><div class="headline">Where this paycheck goes</div><div class="ledger">' + h + '</div></section>';
+  }
+  // What comes out of each account from this paycheck, and what to move there from the account your pay lands in.
+  function accountSplit(c, M) {
+    var home = payAccount(), by = [], buf = +state.settings.buffer || 0, ppm = PER_MONTH[state.settings.frequency] || 1;
+    var add = function (name, amt, label, due) {
+      var g = by.find(function (x) { return sameAcct(x.name, name); });
+      if (!g) { g = { name: name, total: 0, lines: [], due: null }; by.push(g); }
+      g.total += amt; g.lines.push(label); if (due && (!g.due || due < g.due)) g.due = due;
+    };
+    c.items.forEach(function (it) { if (it.status !== 'paid') add(accountFor(it.src), it.amount, it.name, it.due); });
+    state.budget.forEach(function (b) { add(b.account || home, (+b.amount || 0) / ppm, b.name, null); });
+    if (!c.extraDone && c.suggested > 0.004 && M.target) add(M.target.account || home, c.suggested, 'Extra to ' + M.target.name, null);
+    if (!by.length) return '';
+    by.sort(function (a, b) { return sameAcct(a.name, home) ? -1 : sameAcct(b.name, home) ? 1 : b.total - a.total; });
+    var h = by.map(function (g) {
+      var move = home && g.name && !sameAcct(g.name, home);
+      return '<div class="txn-row"><div class="row-main"><div class="row-title">' + esc(g.name || 'No account set') + '</div><div class="sub muted">' + esc(g.lines.join(', ')) + '</div>' +
+        (move ? '<div class="sub" style="color:var(--accent)">Move ' + money(g.total) + ' here from ' + esc(home) + (g.due ? ' by ' + fmtShort(g.due) : '') + '</div>' : '') +
+        (!g.name ? '<div class="sub muted">Set "Pays from" on these bills.</div>' : '') + '</div><div class="row-amount">' + money(g.total) + '</div></div>';
+    }).join('');
+    return '<div class="section"><div class="section-label">Coming out of each account</div><div class="list">' + h + '</div>' +
+      '<div class="section-foot">' + (home ? 'Your paycheck lands in ' + esc(home) + '. ' : '') + 'Unpaid items only. Set where each bill comes from with "Pays from" on the Bills and Debt tabs.</div></div>';
+  }
+  function accountsView() {
+    var M = build();
+    var h = '<div class="head"><h1 class="large-title">Accounts</h1><div class="sub muted">' + (M ? 'What\'s due before your ' + fmtShort(M.checks[M.cur + 1] ? M.checks[M.cur + 1].date : addDays(M.checks[M.cur].end, 1)) + ' paycheck' : 'Your balances and what comes out of each') + '</div></div>' + banners();
+    if (!M) return h + '<div class="list"><div class="empty">Set your pay schedule in Settings first.</div></div>';
+    var bals = plaidBalances(), home = payAccount();
+    var cashOf = function (b) { return b.available != null ? +b.available : +b.current || 0; };
+    var deps = bals.filter(function (b) { return b.type === 'depository'; }), creds = bals.filter(function (b) { return b.type === 'credit'; });
+    var cash = deps.reduce(function (s, b) { return s + cashOf(b); }, 0);
+    var owed = state.debts.reduce(function (s, d) { return s + Math.max(0, +d.balance || 0); }, 0);
+    // Everything unpaid on the current paycheck, including anything overdue.
+    var cur = M.checks[M.cur], groups = [];
+    var add = function (name, it) { var g = groups.find(function (x) { return sameAcct(x.name, name); }); if (!g) { g = { name: name, items: [], total: 0 }; groups.push(g); } g.items.push(it); g.total += it.amount; };
+    cur.items.forEach(function (it) { if (it.status !== 'paid') add(accountFor(it.src), it); });
+    var dueTotal = groups.reduce(function (s, g) { return s + g.total; }, 0);
+    h += '<section class="card hero"><div class="foot muted">Cash in your bank accounts</div><div class="amount-hero">' + (deps.length ? money(cash, true) : '—') + '</div>' +
+      '<div class="ledger">' +
+      '<div><span>Bills and minimums still due</span><span>&minus;' + money(dueTotal) + '</span></div>' +
+      (deps.length ? '<div class="total' + (cash - dueTotal < -0.004 ? ' short' : '') + '"><span>After those</span><span>' + money(cash - dueTotal) + '</span></div>' : '') +
+      '</div><div class="sub muted">' + money(owed) + ' card debt on the Debt tab</div></section>';
+    var names = [];
+    var addName = function (n) { if (n && !names.some(function (x) { return sameAcct(x, n); })) names.push(n); };
+    addName(home); deps.forEach(function (b) { addName(b.name); }); groups.forEach(function (g) { addName(g.name); });
+    names.forEach(function (n) {
+      var b = deps.find(function (x) { return sameAcct(x.name, n); }), g = groups.find(function (x) { return sameAcct(x.name, n); }) || { items: [], total: 0 };
+      var bal = b ? cashOf(b) : null, after = bal != null ? bal - g.total : null, first = g.items.reduce(function (m, it) { return !m || it.due < m ? it.due : m; }, null);
+      var status = !g.items.length ? 'Nothing due before your next paycheck.' :
+        after == null ? 'Have ' + money(g.total) + ' here by ' + fmtShort(first) + '.' :
+        after < -0.004 ? 'Short ' + money(-after) + '. Move it here by ' + fmtShort(first) + '.' : money(after) + ' left after these.';
+      h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>' + esc(n) + (sameAcct(n, home) ? ' · paycheck' : '') + '</span><span class="num">' + (bal != null ? money(bal) : 'Not linked') + '</span></div>' +
+        (g.items.length ? '<div class="list" role="list">' + g.items.map(itemRow).join('') + '</div>' : '') +
+        '<div class="section-foot"' + (after != null && after < -0.004 ? ' style="color:var(--late)"' : '') + '>' + status + '</div></div>';
+    });
+    var none = groups.find(function (g) { return !g.name; });
+    if (none) h += '<div class="section"><div class="section-label">No account set</div><div class="list" role="list">' + none.items.map(itemRow).join('') + '</div><div class="section-foot">Edit these on the Bills or Debt tab and set "Pays from".</div></div>';
+    if (creds.length) h += '<div class="section"><div class="section-label">Linked cards</div><div class="list">' + creds.map(function (b) {
+      return '<div class="txn-row"><div class="row-main"><div class="row-title">' + esc(b.name) + '</div><div class="sub muted">' + (b.limit ? money(+b.limit) + ' limit' : 'Credit card') + '</div></div><div class="row-amount">' + money(+b.current || 0) + ' owed</div></div>';
+    }).join('') + '</div></div>';
+    var synced = plaid.items.map(function (i) { return i.last_synced; }).filter(Boolean).sort().pop();
+    h += '<div class="section-foot">' + (bals.length ? 'Balances from your bank' + (synced ? ', updated ' + fmtStamp(synced) : '') + '. ' : 'Connect your banks in Settings to see balances here. ') + 'Pending charges may not be counted yet.</div>';
     return h;
   }
   function extraCard(c, M) {
@@ -636,7 +797,7 @@ button.row:active { background: var(--surface-2); }
     if (bills.length || state.debts.length) h += monthSection();
     if (bills.length) h += '<div class="section-label" style="margin-bottom:-16px">Your bills</div>';
     var rowFor = function (b) {
-      return '<button class="row plain" data-act="edit-bill" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">Due the ' + ord(+b.dueDay) + (b.essential ? ' · essential' : '') + '</span></span><span class="row-amount">' + (b.variable ? '~' : '') + money(+b.amount) + '</span>' + I.chev + '</button>';
+      return '<button class="row plain" data-act="edit-bill" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">Due the ' + ord(+b.dueDay) + (b.essential ? ' · essential' : '') + (accountFor(b) ? ' · ' + esc(accountFor(b)) : '') + '</span></span><span class="row-amount">' + (b.variable ? '~' : '') + money(+b.amount) + '</span>' + I.chev + '</button>';
     };
     if (!bills.length) {
       h += '<div class="list"><div class="empty">No bills yet. Add rent, utilities, subscriptions and anything else that repeats each month.</div></div>';
@@ -650,6 +811,13 @@ button.row:active { background: var(--surface-2); }
     }
     h += '<div class="section-foot">Each bill goes on the last paycheck before it\'s due. Debt minimums are set on the Debt tab.</div>';
     h += '<button class="btn filled block" data-act="add-bill">Add bill</button>';
+    var ppm = PER_MONTH[state.settings.frequency] || 1;
+    h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>Monthly budget</span><span class="num">' + money(budgetMonthly()) + '</span></div>' +
+      (state.budget.length ? '<div class="list" role="list">' + state.budget.map(function (b) {
+        return '<button class="row plain" data-act="edit-budget" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + money((+b.amount || 0) / ppm) + ' a paycheck' + (b.account ? ' · ' + esc(b.account) : '') + '</span></span><span class="row-amount">' + money(+b.amount) + '</span>' + I.chev + '</button>';
+      }).join('') + '</div>' : '<div class="list"><div class="empty">Groceries, gas, eating out: spending with no due date.</div></div>') +
+      '<div class="section-foot">No due date. Payday splits these evenly across your paychecks' + (budgetPerCheck() ? ', ' + money(budgetPerCheck()) + ' from each' : '') + '.</div></div>';
+    h += '<button class="btn tinted block" data-act="add-budget">Add budget item</button>';
     return h;
   }
   var monthOffset = 0;
@@ -691,7 +859,7 @@ button.row:active { background: var(--surface-2); }
     var h = '<div class="head"><h1 class="large-title">Debt</h1><div class="sub muted">' + money(total) + ' left across ' + state.debts.filter(function (d) { return d.balance > 0.004; }).length + ' balances</div></div>' + banners();
     if (state.debts.length) {
       h += '<section class="card hero"><div class="foot muted">Debt-free by</div><div class="amount-hero" style="font-size:40px;line-height:46px">' + (total < 0.01 ? 'Done' : P.months == null ? 'Not yet' : monthLabel(P.months)) + '</div>' +
-        '<div class="sub muted">' + (P.months == null && total >= 0.01 ? 'At this pace the balances keep growing. Lower the spending amount in Settings or add income to free up extra.' : 'Paying minimums plus about ' + money(P.extraM) + ' extra a month, based on your usual paycheck, bills and spending money.') + '</div></section>';
+        '<div class="sub muted">' + (P.months == null && total >= 0.01 ? 'At this pace the balances keep growing. Lower the spending amount in Settings or add income to free up extra.' : 'Paying minimums plus about ' + money(P.extraM) + ' extra a month, based on your usual paycheck, bills, monthly budget and spending money.') + '</div></section>';
       h += '<div class="section"><div class="section-label">Pay off first</div><div class="seg" role="tablist" aria-label="Payoff order">' +
         '<button role="tab" data-act="strategy" data-v="avalanche" aria-selected="' + (S.strategy !== 'snowball') + '" class="' + (S.strategy !== 'snowball' ? 'on' : '') + '">Highest interest</button>' +
         '<button role="tab" data-act="strategy" data-v="snowball" aria-selected="' + (S.strategy === 'snowball') + '" class="' + (S.strategy === 'snowball' ? 'on' : '') + '">Smallest balance</button></div>' +
@@ -715,8 +883,8 @@ button.row:active { background: var(--surface-2); }
   function settingsView() {
     var S = state.settings;
     return '<div class="head"><h1 class="large-title">Settings</h1></div>' + banners() +
-      '<form class="section" id="pay-form"><div class="section-label">Pay schedule</div><div class="list">' + payFields(S) + '</div>' +
-      '<div class="section-foot">Spending money is what you keep set aside each paycheck for groceries, gas and the rest. Payday only suggests extra debt payments from what\'s left after that.</div>' +
+      '<form class="section" id="pay-form"><div class="section-label">Pay schedule</div><div class="list">' + payFields(S) + accountField('f-acct', S.payAccount, 'Paycheck goes to', payAccount() || 'Optional') + '</div>' +
+      '<div class="section-foot">Spending money is anything extra you keep each paycheck beyond your monthly budget on the Bills tab. Payday only suggests extra debt payments from what\'s left after both.</div>' +
       '<button class="btn tinted block" type="submit">Save pay schedule</button></form>' +
       plaidSection() + bankSection() +
       '<div class="section"><div class="section-label">Account</div><div class="list"><button class="row plain" data-act="sign-out"><span class="row-main" style="color:var(--accent)">Sign out</span></button><button class="row plain" data-act="sign-out-all"><span class="row-main" style="color:var(--accent)">Sign out on all devices</span></button></div></div>' +
@@ -862,7 +1030,8 @@ button.row:active { background: var(--surface-2); }
   function render() {
     renderTabs();
     var app = document.getElementById('app');
-    app.innerHTML = tab === 'home' ? homeView() : tab === 'bills' ? billsView() : tab === 'debt' ? debtView() : settingsView();
+    guessCache = null;
+    app.innerHTML = tab === 'home' ? homeView() : tab === 'bills' ? billsView() : tab === 'debt' ? debtView() : tab === 'accounts' ? accountsView() : settingsView();
   }
 
   // ---------- sheets ----------
@@ -951,17 +1120,35 @@ button.row:active { background: var(--surface-2); }
       '<div class="field"><label for="b-amount" id="b-amount-label">' + (b.variable ? 'Estimate' : 'Amount') + '</label><input id="b-amount" name="amount" inputmode="decimal" placeholder="$0.00" value="' + (b.amount !== '' ? money(+b.amount) : '') + '" required></div>' +
       '<div class="field"><label for="b-day">Due day</label><input id="b-day" name="day" inputmode="numeric" placeholder="1 to 31" value="' + esc(b.dueDay) + '" required></div>' +
       '<div class="field"><label for="b-ess">Essential</label><input id="b-ess" name="essential" type="checkbox"' + (b.essential ? ' checked' : '') + '></div>' +
-      '<div class="field"><label for="b-match">On bank statement</label><input id="b-match" name="match" placeholder="Optional" value="' + esc(b.match || '') + '" maxlength="80"></div></div>' +
+      '<div class="field"><label for="b-match">On bank statement</label><input id="b-match" name="match" placeholder="Optional" value="' + esc(b.match || '') + '" maxlength="80"></div>' +
+      accountField('b-acct', b.account, 'Pays from', id ? accountFor(b) || 'Optional' : 'Optional') + '</div>' +
       '<div class="section-foot">Essential bills are things like rent, power and insurance. Payday lists them first when money is tight. "On bank statement" is the text your bank shows for this payment, like ATT*BILL. Separate a few with commas. It helps Payday match imported payments.</div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-bill" data-id="' + id + '">Delete bill</button>' : '');
     openSheet(id ? 'Edit bill' : 'New bill', body, { saveLabel: 'Save', onSave: function (fd) {
       var amt = num(fd.get('amount')), day = parseInt(fd.get('day'), 10), name = String(fd.get('name') || '').trim();
       if (!name || !(amt >= 0) || !(day >= 1 && day <= 31)) { toast('Add a name, an amount, and a due day from 1 to 31.'); return false; }
       var curB = id && state.bills.find(function (x) { return x.id === id; });
-      var vals = { name: name, amount: amt, dueDay: day, essential: !!fd.get('essential'), variable: fd.get('type') === 'variable', match: String(fd.get('match') || '').trim() };
+      var vals = { name: name, amount: amt, dueDay: day, essential: !!fd.get('essential'), variable: fd.get('type') === 'variable', match: String(fd.get('match') || '').trim(), account: String(fd.get('account') || '').trim() };
       if (curB) Object.assign(curB, vals);
       else state.bills.push(Object.assign({ id: uid() }, vals));
       render(); save(id ? 'Bill updated' : 'Bill added');
+    } });
+  }
+  function budgetSheet(id) {
+    var b = state.budget.find(function (x) { return x.id === id; }) || { name: '', amount: '', account: '' };
+    var body = '<div class="list">' +
+      '<div class="field"><label for="g-name">Name</label><input id="g-name" name="name" placeholder="Groceries" value="' + esc(b.name) + '" required maxlength="60"></div>' +
+      '<div class="field"><label for="g-amount">Per month</label><input id="g-amount" name="amount" inputmode="decimal" placeholder="$0.00" value="' + (b.amount !== '' ? money(+b.amount) : '') + '" required></div>' +
+      accountField('g-acct', b.account, 'Spent from', payAccount() || 'Optional') + '</div>' +
+      '<div class="section-foot">For spending with no due date, like groceries, gas or eating out. Payday splits it evenly across your paychecks.</div>' +
+      (id ? '<button type="button" class="btn danger" data-act="del-budget" data-id="' + id + '">Delete budget item</button>' : '');
+    openSheet(id ? 'Edit budget item' : 'New budget item', body, { saveLabel: 'Save', onSave: function (fd) {
+      var amt = num(fd.get('amount')), name = String(fd.get('name') || '').trim();
+      if (!name || !(amt >= 0)) { toast('Add a name and a monthly amount.'); return false; }
+      var v = { name: name, amount: Math.round(amt * 100) / 100, account: String(fd.get('account') || '').trim() };
+      var cur = id && state.budget.find(function (x) { return x.id === id; });
+      if (cur) Object.assign(cur, v); else state.budget.push(Object.assign({ id: uid() }, v));
+      render(); save(id ? 'Budget updated' : 'Budget item added');
     } });
   }
   function debtSheet(id) {
@@ -973,13 +1160,14 @@ button.row:active { background: var(--surface-2); }
       '<div class="field"><label for="d-min">Minimum payment</label><input id="d-min" name="minimum" inputmode="decimal" placeholder="$0.00" value="' + (d.minimum !== '' ? money(+d.minimum) : '') + '" required></div>' +
       '<div class="field"><label for="d-day">Due day</label><input id="d-day" name="day" inputmode="numeric" placeholder="1 to 31" value="' + esc(d.dueDay) + '" required></div>' +
       '<div class="field"><label for="d-start">Starting balance</label><input id="d-start" name="start" inputmode="decimal" placeholder="Same as now" value="' + (d.startBalance !== '' ? money(+d.startBalance) : '') + '"></div>' +
-      '<div class="field"><label for="d-match">On bank statement</label><input id="d-match" name="match" placeholder="Optional" value="' + esc(d.match || '') + '" maxlength="80"></div></div>' +
+      '<div class="field"><label for="d-match">On bank statement</label><input id="d-match" name="match" placeholder="Optional" value="' + esc(d.match || '') + '" maxlength="80"></div>' +
+      accountField('d-acct', d.account, 'Pays from', id ? accountFor(d) || 'Optional' : 'Optional') + '</div>' +
       '<div class="section-foot">Starting balance is what you owed when you began tracking. It\'s used to show progress.</div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-debt" data-id="' + id + '">Delete debt</button>' : '');
     openSheet(id ? 'Edit debt' : 'New debt', body, { saveLabel: 'Save', onSave: function (fd) {
       var bal = num(fd.get('balance')), apr = num(fd.get('apr')), min = num(fd.get('minimum')), day = parseInt(fd.get('day'), 10), start = num(fd.get('start')), name = String(fd.get('name') || '').trim();
       if (!name || !(bal >= 0) || !(apr >= 0) || !(min >= 0) || !(day >= 1 && day <= 31)) { toast('Fill in the name, balance, interest, minimum and a due day from 1 to 31.'); return false; }
-      var v = { name: name, balance: bal, apr: apr, minimum: min, dueDay: day, startBalance: start >= bal ? start : bal, match: String(fd.get('match') || '').trim() };
+      var v = { name: name, balance: bal, apr: apr, minimum: min, dueDay: day, startBalance: start >= bal ? start : bal, match: String(fd.get('match') || '').trim(), account: String(fd.get('account') || '').trim() };
       var curD = id && state.debts.find(function (x) { return x.id === id; });
       if (curD) Object.assign(curD, v); else state.debts.push(Object.assign({ id: uid() }, v));
       render(); save(id ? 'Debt updated' : 'Debt added');
@@ -1005,6 +1193,7 @@ button.row:active { background: var(--surface-2); }
     if (!(pay > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(next)) { toast('Add your take-home pay and your next payday.'); return; }
     var S = state.settings;
     S.payAmount = pay; S.frequency = String(fd.get('freq')); S.nextPayDate = next; S.buffer = buffer >= 0 ? buffer : 0;
+    if (fd.has('account')) S.payAccount = String(fd.get('account') || '').trim();
     if (!S.trackFrom) { var p = paydays(S, addDays(TODAY, -70), addDays(TODAY, 140)).filter(function (d) { return d <= TODAY; }); S.trackFrom = p.length ? p[p.length - 1] : TODAY; }
     if (isOnboard) tab = 'bills';
     render(); save(isOnboard ? 'Pay schedule saved. Now add your bills.' : 'Pay schedule saved');
@@ -1037,6 +1226,7 @@ button.row:active { background: var(--surface-2); }
     if (a === 'close-scrim') { if (e.target === t) closeSheet(); return; }
     if (a === 'close') { closeSheet(); return; }
     if (a === 'pay-prev') { payOffset--; render(); return; }
+    if (a === 'pay-go') { payOffset = +t.dataset.off || 0; render(); return; }
     if (a === 'pay-next') { payOffset++; render(); return; }
     if (a === 'item') { itemSheet(key); return; }
     if (a === 'pay' || a === 'save-actual' || a === 'save-paid') {
@@ -1120,6 +1310,9 @@ button.row:active { background: var(--surface-2); }
     if (a === 'add-bill') { billSheet(null); return; }
     if (a === 'edit-bill') { billSheet(t.dataset.id); return; }
     if (a === 'del-bill') { var id = t.dataset.id; state.bills = state.bills.filter(function (b) { return b.id !== id; }); closeSheet(); render(); save('Bill deleted'); return; }
+    if (a === 'add-budget') { budgetSheet(null); return; }
+    if (a === 'edit-budget') { budgetSheet(t.dataset.id); return; }
+    if (a === 'del-budget') { var gi = t.dataset.id; state.budget = state.budget.filter(function (b) { return b.id !== gi; }); closeSheet(); render(); save('Budget item deleted'); return; }
     if (a === 'add-debt') { debtSheet(null); return; }
     if (a === 'edit-debt') { debtSheet(t.dataset.id); return; }
     if (a === 'del-debt') { var di = t.dataset.id; state.debts = state.debts.filter(function (b) { return b.id !== di; }); closeSheet(); render(); save('Debt deleted'); return; }
