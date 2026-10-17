@@ -472,11 +472,17 @@ button.row:active { background: var(--surface-2); }
     b = state.budget.find(function (x) { return (x.cats || []).indexOf(t.category) >= 0; });
     return b ? { id: b.id, how: 'category' } : null;
   }
+  // Purchases count toward the budget, and so does anything you sorted by hand or by store name, even a transfer.
+  function counts(t, linked) {
+    if (isPurchase(t, linked)) return true;
+    var r = !linked[t.transaction_id] && bucketFor(t);
+    return !!r && r.how !== 'category';
+  }
   function monthSpend(ym) {
     var linked = linkedMap(), out = { by: {}, unsorted: [], total: 0 };
     state.budget.forEach(function (b) { out.by[b.id] = { total: 0, txns: [] }; });
     txns.forEach(function (t) {
-      if (t.date.slice(0, 7) !== ym || !isPurchase(t, linked)) return;
+      if (t.date.slice(0, 7) !== ym || linked[t.transaction_id] || !counts(t, linked)) return;
       var r = bucketFor(t);
       if (!r) { if (t.amount > 0) out.unsorted.push(t); return; }
       if (r.id === 'none') return;
@@ -766,6 +772,8 @@ button.row:active { background: var(--surface-2); }
       '<div class="meta"><span>' + money(c.assigned) + ' to ' + c.items.length + (c.items.length === 1 ? ' bill' : ' bills') + (c.reserve > 0.004 ? ' + ' + money(c.reserve) + ' set aside' : '') + (c.extraDone ? ' + ' + money(c.extraDone.amount) + ' extra' : '') + (c.coveredIn > 0.004 ? ' · ' + money(c.coveredIn) + ' carried in' : '') + '</span>' +
       '<button class="linkbtn" data-act="edit-amount" data-date="' + c.date + '">' + money(c.amount) + ' paycheck' + (c.custom ? ' (edited)' : '') + '</button></div></section>';
     h += ledger(c, M);
+    var toSort = state.budget.length ? monthSpend(ymOf(0)).unsorted.length : 0;
+    if (toSort) h += '<div class="banner"><p>' + toSort + (toSort === 1 ? ' purchase this month isn\'t' : ' purchases this month aren\'t') + ' in a budget bucket yet.</p><button data-act="go-sort">Sort purchases</button></div>';
     var pm = pendingMatches();
     if (pm.length) h += '<div class="banner"><p>' + (pm.length === 1 ? '1 bank payment looks like one of your bills.' : pm.length + ' bank payments look like your bills.') + ' Link them to record what you actually paid.</p><button data-act="review">Review matches</button></div>';
     var ests = c.items.filter(function (i) { return i.estimated; });
@@ -958,12 +966,35 @@ button.row:active { background: var(--surface-2); }
       }).join('') + '</div><div class="section-foot">Tap a bucket to see its purchases or change its stores and categories.</div></div>';
     } else h += '<div class="list"><div class="empty">Add buckets like Groceries, Gas or Eating out, then sort your card and bank purchases into them.</div></div>';
     h += '<button class="btn filled block" data-act="add-budget">Add bucket</button>';
-    if (sp.unsorted.length) {
-      var unsortedTotal = sp.unsorted.reduce(function (s, t) { return s + t.amount; }, 0);
-      h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>Not sorted yet</span><span class="num">' + money(unsortedTotal) + '</span></div><div class="list" role="list">' +
-        sp.unsorted.map(function (t) { return txnLine(t, CAT_LABEL[t.category] || ''); }).join('') + '</div><div class="section-foot">Tap a purchase to put it in a bucket. Bill payments, card payments and transfers aren\'t listed here.</div></div>';
-    }
+    if (!sp.unsorted.length && purch.filter === 'unsorted') purch.filter = 'all';
+    h += '<div class="section" id="purchases"><div class="section-label">Purchases</div>' +
+      '<div class="seg" role="tablist" aria-label="Which purchases">' + [['all', 'All'], ['unsorted', 'Not sorted' + (sp.unsorted.length ? ' (' + sp.unsorted.length + ')' : '')]].map(function (f) {
+        return '<button role="tab" data-act="purch-filter" data-v="' + f[0] + '" aria-selected="' + (purch.filter === f[0]) + '" class="' + (purch.filter === f[0] ? 'on' : '') + '">' + f[1] + '</button>';
+      }).join('') + '</div>' +
+      '<div class="list"><div class="field"><label for="p-q">Search</label><input id="p-q" type="search" placeholder="Store or amount" autocomplete="off" value="' + esc(purch.q) + '"></div></div>' +
+      '<div class="list" role="list" id="p-list">' + purchaseRows(ym) + '</div>' +
+      '<div class="section-foot">Tap any purchase to put it in a bucket or move it to another one.</div>' +
+      '<button class="btn tinted block" data-act="purch-other">' + (purch.other ? 'Hide transfers and payments' : 'Show transfers and payments too') + '</button></div>';
     return h;
+  }
+  var purch = { filter: 'all', other: false, q: '' };
+  // This month's purchases with the bucket each one is in. Transfers and payments show only when asked for, or once you've sorted them.
+  function purchaseRows(ym) {
+    var linked = linkedMap(), q = purch.q.toLowerCase().trim(), qn = num(q), names = {};
+    state.budget.forEach(function (b) { names[b.id] = b.name; });
+    var list = txns.filter(function (t) {
+      if (t.date.slice(0, 7) !== ym || linked[t.transaction_id] || !t.amount) return false;
+      if (!counts(t, linked) && !(purch.other && t.amount > 0)) return false;
+      if (t.amount < 0 && !bucketFor(t)) return false;
+      if (purch.filter === 'unsorted' && bucketFor(t)) return false;
+      return !q || (String(t.name || '') + ' ' + String(t.merchant_name || '')).toLowerCase().indexOf(q) >= 0 || (qn > 0 && Math.abs(Math.abs(t.amount) - qn) < 0.005);
+    });
+    if (!list.length) return '<div class="empty">' + (q ? 'No purchases match that search.' : purch.filter === 'unsorted' ? 'Everything this month is sorted.' : 'No purchases this month yet.') + '</div>';
+    return list.map(function (t) {
+      var r = bucketFor(t), tag = !r ? badge('due', 'Not sorted') : r.id === 'none' ? badge('', 'Not budget') : badge('debt', names[r.id] || 'Bucket');
+      return '<button type="button" class="row plain" data-act="txn" data-txn="' + esc(t.transaction_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(t.merchant_name || t.name) + '</span><span class="sub muted" style="display:block">' + fmtShort(t.date) + (t.pending ? ' · pending' : '') + ' · ' + esc(t.account_name || '') + '</span></span>' +
+        '<span class="row-end"><span class="row-amount">' + money(t.amount) + '</span>' + tag + '</span></button>';
+    }).join('');
   }
   function bucketSheet(id) {
     var b = state.budget.find(function (x) { return x.id === id; }); if (!b) return;
@@ -984,7 +1015,7 @@ button.row:active { background: var(--surface-2); }
       (CAT_LABEL[t.category] ? '<div class="sub muted">Plaid label: ' + CAT_LABEL[t.category] + '</div>' : '') + '</div><div class="title num">' + money(t.amount) + '</div></div></div>' +
       '<div class="section"><div class="section-label">Put it in</div><div class="list" role="list">' + state.budget.map(function (b) { return opt(b.id, esc(b.name)); }).join('') +
       opt('none', 'Not budget spending', 'Leave it out of every bucket') + opt('', 'Not sorted', '') + '</div></div>' +
-      (payee ? '<div class="list"><div class="field"><label for="t-remember">Always put ' + esc(payee) + ' here</label><input id="t-remember" type="checkbox" checked></div></div>' : '') +
+      (payee ? '<div class="list"><div class="field"><label for="t-remember">Always put ' + esc(payee) + ' here</label><input id="t-remember" type="checkbox"' + (isPurchase(t, linkedMap()) ? ' checked' : '') + '></div></div>' : '') +
       (state.budget.length ? '' : '<div class="section-foot">Add buckets on the Budget screen first.</div>');
     openSheet('Purchase', body, { focus: false });
   }
@@ -1414,6 +1445,9 @@ button.row:active { background: var(--surface-2); }
     if (e.target.id === 'onboard' || e.target.id === 'pay-form') { e.preventDefault(); applyPay(e.target, e.target.id === 'onboard'); }
   });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSheet(); });
+  document.addEventListener('input', function (e) {
+    if (e.target.id === 'p-q') { purch.q = e.target.value; var l = document.getElementById('p-list'); if (l) l.innerHTML = purchaseRows(ymOf(monthOffset)); }
+  });
   document.addEventListener('change', function (e) {
     if (e.target.id !== 'txn-file' || !e.target.files || !e.target.files[0]) return;
     var file = e.target.files[0], reader = new FileReader();
@@ -1528,6 +1562,9 @@ button.row:active { background: var(--surface-2); }
     if (a === 'del-budget') { var gi = t.dataset.id; state.budget = state.budget.filter(function (b) { return b.id !== gi; }); Object.keys(state.txnBudget).forEach(function (k) { if (state.txnBudget[k] === gi) delete state.txnBudget[k]; }); closeSheet(); render(); save('Budget item deleted'); return; }
     if (a === 'bills-mode') { billsMode = t.dataset.v; render(); window.scrollTo(0, 0); return; }
     if (a === 'txn') { txnSheet(t.dataset.txn); return; }
+    if (a === 'purch-filter') { purch.filter = t.dataset.v; render(); return; }
+    if (a === 'purch-other') { purch.other = !purch.other; render(); return; }
+    if (a === 'go-sort') { tab = 'bills'; billsMode = 'budget'; monthOffset = 0; purch.filter = 'unsorted'; render(); var el = document.getElementById('purchases'); if (el) el.scrollIntoView(); return; }
     if (a === 'bucket') { bucketSheet(t.dataset.id); return; }
     if (a === 'assign') {
       var tx2 = txnById[t.dataset.txn], to = t.dataset.b; if (!tx2) return;
