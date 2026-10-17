@@ -276,8 +276,34 @@ button.row:active { background: var(--surface-2); }
     }
     return out;
   }
+  // How often a bill comes due. Debts are always monthly.
+  var BILL_FREQ = [['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'], ['semimonthly', 'Twice a month'], ['monthly', 'Monthly'], ['quarterly', 'Every 3 months'], ['yearly', 'Once a year']];
+  var FREQ_NAME = {}; BILL_FREQ.forEach(function (f) { FREQ_NAME[f[0]] = f[1]; });
+  var PER_MONTH_BILL = { weekly: 52 / 12, biweekly: 26 / 12, semimonthly: 2, monthly: 1, quarterly: 1 / 3, yearly: 1 / 12 };
+  function monthlyCost(b) { return (+b.amount || 0) * (PER_MONTH_BILL[b.freq || 'monthly'] || 1); }
+  // Every due date for a bill from one day to another, inclusive.
+  function dueDates(src, from, to) {
+    var f = src.freq || 'monthly', out = [];
+    // A bill with a due date to count from starts there. Nothing is due before it.
+    if (src.start && f !== 'monthly' && f !== 'semimonthly' && src.start > from) from = src.start;
+    if ((f === 'weekly' || f === 'biweekly') && src.start) {
+      var step = f === 'weekly' ? 7 : 14, gap = daysBetween(src.start, from), d = addDays(src.start, gap > 0 ? Math.ceil(gap / step) * step : -Math.floor(-gap / step) * step);
+      for (; d <= to; d = addDays(d, step)) if (d >= from) out.push(d);
+      return out;
+    }
+    var a = parse(from), y = a.getFullYear(), m = a.getMonth(), anchor = src.start ? parse(src.start) : null;
+    for (var i = 0; i < 400; i++) {
+      var mm = m + i, yy = y + Math.floor(mm / 12), mo = ((mm % 12) + 12) % 12, days = [];
+      if (yy + '-' + pad(mo + 1) + '-01' > to) break;
+      if (f === 'semimonthly') days = [src.dueDay, src.dueDay2];
+      else if ((f === 'quarterly' || f === 'yearly') && anchor) { var every = f === 'yearly' ? 12 : 3, diff = (yy - anchor.getFullYear()) * 12 + mo - anchor.getMonth(); if (((diff % every) + every) % every === 0) days = [anchor.getDate()]; }
+      else days = [src.dueDay];
+      days.forEach(function (dd) { var due = yy + '-' + pad(mo + 1) + '-' + pad(Math.min(dd, lastDay(yy, mo))); if (due >= from && due <= to && out.indexOf(due) < 0) out.push(due); });
+    }
+    return out.sort();
+  }
   function makeSources(allDebts) {
-    return state.bills.map(function (b) { return { kind: 'bill', id: b.id, name: b.name, amount: +b.amount || 0, dueDay: +b.dueDay || 1, essential: !!b.essential, variable: !!b.variable, match: b.match || '', account: b.account || '' }; })
+    return state.bills.map(function (b) { return { kind: 'bill', id: b.id, name: b.name, amount: +b.amount || 0, dueDay: +b.dueDay || 1, freq: b.freq || 'monthly', dueDay2: +b.dueDay2 || 15, start: b.start || '', essential: !!b.essential, variable: !!b.variable, match: b.match || '', account: b.account || '' }; })
       .concat(state.debts.filter(function (d) { return (allDebts || d.balance > 0.004) && d.minimum > 0; }).map(function (d) {
         return { kind: 'debt', id: d.id, name: d.name, amount: d.balance > 0.004 ? Math.min(+d.minimum, +d.balance) : +d.minimum, dueDay: +d.dueDay || 1, essential: true, match: d.match || '', balance: +d.balance, account: d.account || '' };
       }));
@@ -629,12 +655,9 @@ button.row:active { background: var(--surface-2); }
       return { date: p, end: i < pays.length - 1 ? addDays(pays[i + 1], -1) : addDays(p, 13), index: i, items: [],
         amount: state.payAmounts[p] != null ? +state.payAmounts[p] : +S.payAmount || 0, custom: state.payAmounts[p] != null };
     });
-    var first = parse(pays[0]);
-    for (var m = 0; m < 8; m++) {
-      var mm = first.getMonth() + m, yy = first.getFullYear() + Math.floor(mm / 12), mo = ((mm % 12) + 12) % 12;
-      sources.forEach(function (src) {
-        var due = yy + '-' + pad(mo + 1) + '-' + pad(Math.min(src.dueDay, lastDay(yy, mo)));
-        if (due < pays[0] || due > lastPay || (S.trackFrom && due < S.trackFrom)) return;
+    sources.forEach(function (src) {
+      dueDates(src, pays[0], lastPay).forEach(function (due) {
+        if (S.trackFrom && due < S.trackFrom) return;
         var it = itemFor(src, due), key = it.key, pay = null;
         if (state.moves[key] && pays.indexOf(state.moves[key]) >= 0) pay = state.moves[key];
         else pays.forEach(function (p) { if (p <= due) pay = p; });
@@ -645,7 +668,7 @@ button.row:active { background: var(--surface-2); }
         if (it.status !== 'paid' && due <= addDays(TODAY, 5)) it.match = bestMatch(it);
         checks[idx].items.push(it);
       });
-    }
+    });
     var order = debtOrder(state.debts, S.strategy), target = order[0] || null;
     checks.forEach(function (c) {
       var rank = { late: 0, due: 1, upcoming: 2, paid: 3 };
@@ -679,7 +702,7 @@ button.row:active { background: var(--surface-2); }
   function budgetPerCheck() { return Math.round(budgetMonthly() / (PER_MONTH[state.settings.frequency] || 1) * 100) / 100; }
   function projection() {
     var S = state.settings, ppm = PER_MONTH[S.frequency] || 1;
-    var billsM = state.bills.reduce(function (s, b) { return s + (+b.amount || 0); }, 0) + budgetMonthly();
+    var billsM = state.bills.reduce(function (s, b) { return s + monthlyCost(b); }, 0) + budgetMonthly();
     var live = state.debts.filter(function (d) { return d.balance > 0.004; });
     var minsM = live.reduce(function (s, d) { return s + Math.min(+d.minimum || 0, d.balance); }, 0);
     var extraM = Math.max(0, (+S.payAmount || 0) * ppm - billsM - minsM - (+S.buffer || 0) * ppm);
@@ -1072,22 +1095,23 @@ button.row:active { background: var(--surface-2); }
   }
   function billsView() {
     if (billsMode === 'budget') return budgetView();
-    var bills = state.bills.slice().sort(function (a, b) { return a.dueDay - b.dueDay; });
-    var total = bills.reduce(function (s, b) { return s + (+b.amount || 0); }, 0);
+    var srcs = makeSources(true), nextDue = function (b) { return dueDates(srcs.find(function (x) { return x.id === b.id; }) || b, TODAY, addDays(TODAY, 400))[0] || ''; };
+    var bills = state.bills.slice().sort(function (a, b) { var x = nextDue(a), y = nextDue(b); return x < y ? -1 : x > y ? 1 : 0; });
+    var total = bills.reduce(function (s, b) { return s + monthlyCost(b); }, 0);
     var anyVar = bills.some(function (b) { return b.variable; });
     var h = '<div class="head"><h1 class="large-title">Bills</h1><div class="sub muted">' + (anyVar ? 'About ' : '') + money(total) + ' a month across ' + bills.length + (bills.length === 1 ? ' bill' : ' bills') + '</div></div>' + banners() + modeSwitch();
     if (bills.length || state.debts.length) h += monthSection();
     if (bills.length) h += '<div class="section-label" style="margin-bottom:-16px">Your bills</div>';
     var rowFor = function (b) {
-      return '<button class="row plain" data-act="edit-bill" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">Due the ' + ord(+b.dueDay) + (b.essential ? ' · essential' : '') + (accountFor(b) ? ' · ' + esc(accountFor(b)) : '') + '</span></span><span class="row-amount">' + (b.variable ? '~' : '') + money(+b.amount) + '</span>' + I.chev + '</button>';
+      return '<button class="row plain" data-act="edit-bill" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + billWhen(b, nextDue(b)) + (b.essential ? ' · essential' : '') + (accountFor(b) ? ' · ' + esc(accountFor(b)) : '') + '</span></span><span class="row-amount">' + (b.variable ? '~' : '') + money(+b.amount) + ((b.freq || 'monthly') !== 'monthly' ? '<span class="sub muted" style="display:block;text-align:right">' + money(monthlyCost(b)) + '/mo</span>' : '') + '</span>' + I.chev + '</button>';
     };
     if (!bills.length) {
       h += '<div class="list"><div class="empty">No bills yet. Add rent, utilities, subscriptions and anything else that repeats each month.</div></div>';
     } else {
-      [['Static', false, 'Same amount every month.'], ['Variable', true, 'Amounts are estimates. Enter the real amount on the Paycheck tab when each bill comes in.']].forEach(function (g) {
+      [['Static', false, 'Same amount each time. Totals are per month.'], ['Variable', true, 'Amounts are estimates. Enter the real amount on the Paycheck tab when each bill comes in.']].forEach(function (g) {
         var list = bills.filter(function (b) { return !!b.variable === g[1]; });
         if (!list.length) return;
-        var sum = list.reduce(function (s, b) { return s + (+b.amount || 0); }, 0);
+        var sum = list.reduce(function (s, b) { return s + monthlyCost(b); }, 0);
         h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>' + g[0] + '</span><span class="num">' + (g[1] ? '~' : '') + money(sum) + '</span></div><div class="list" role="list">' + list.map(rowFor).join('') + '</div><div class="section-foot">' + g[2] + '</div></div>';
       });
     }
@@ -1096,14 +1120,31 @@ button.row:active { background: var(--surface-2); }
     h += '<div class="section-foot">Groceries, gas and other spending with no due date go on the Budget screen above.</div>';
     return h;
   }
+  // Hidden date fields are disabled so the form doesn't ask for them.
+  function billFreqFields() {
+    var sel = document.getElementById('b-freq'); if (!sel) return;
+    document.querySelectorAll('[data-freq]').forEach(function (row) {
+      var on = row.dataset.freq.split(' ').indexOf(sel.value) >= 0;
+      row.style.display = on ? '' : 'none';
+      row.querySelectorAll('input').forEach(function (i) { i.disabled = !on; });
+    });
+    var lab = document.getElementById('b-day-label'); if (lab) lab.textContent = sel.value === 'semimonthly' ? 'First due day' : 'Due day';
+  }
+  function billWhen(b, next) {
+    var f = b.freq || 'monthly';
+    if (f === 'monthly') return 'Monthly · due the ' + ord(+b.dueDay || 1);
+    if (f === 'semimonthly') return 'Twice a month · the ' + ord(+b.dueDay || 1) + ' and ' + ord(+b.dueDay2 || 15);
+    return FREQ_NAME[f] + (next ? ' · next ' + fmtShort(next) : ' · set a due date');
+  }
   var monthOffset = 0;
   function monthItems(y, mo) {
     var out = [];
     makeSources(true).forEach(function (src) {
-      var due = y + '-' + pad(mo + 1) + '-' + pad(Math.min(src.dueDay, lastDay(y, mo)));
-      var it = itemFor(src, due);
-      if (it.kind === 'debt' && !(src.balance > 0.004) && it.status !== 'paid') return;
-      out.push(it);
+      dueDates(src, y + '-' + pad(mo + 1) + '-01', y + '-' + pad(mo + 1) + '-' + pad(lastDay(y, mo))).forEach(function (due) {
+        var it = itemFor(src, due);
+        if (it.kind === 'debt' && !(src.balance > 0.004) && it.status !== 'paid') return;
+        out.push(it);
+      });
     });
     var rank = { late: 0, due: 1, upcoming: 2, untracked: 3, paid: 4 };
     return out.sort(function (a, b) { return a.due < b.due ? -1 : a.due > b.due ? 1 : rank[a.status] - rank[b.status]; });
@@ -1390,22 +1431,32 @@ button.row:active { background: var(--surface-2); }
       '<button type="button" role="radio" data-act="bill-type" data-v="static" aria-checked="' + !b.variable + '" class="' + (b.variable ? '' : 'on') + '">Static</button>' +
       '<button type="button" role="radio" data-act="bill-type" data-v="variable" aria-checked="' + !!b.variable + '" class="' + (b.variable ? 'on' : '') + '">Variable</button></div>' +
       '<input type="hidden" id="b-type" name="type" value="' + (b.variable ? 'variable' : 'static') + '">' +
-      '<div class="section-foot" id="b-type-note">' + (b.variable ? 'Changes month to month, like power or water. Enter your best estimate.' : 'Same amount every month, like rent or a subscription.') + '</div>' +
+      '<div class="section-foot" id="b-type-note">' + (b.variable ? 'Changes from bill to bill, like power or water. Enter your best estimate.' : 'Same amount each time, like rent or a subscription.') + '</div>' +
       '<div class="list">' +
       '<div class="field"><label for="b-name">Name</label><input id="b-name" name="name" placeholder="Rent" value="' + esc(b.name) + '" required maxlength="60"></div>' +
       '<div class="field"><label for="b-amount" id="b-amount-label">' + (b.variable ? 'Estimate' : 'Amount') + '</label><input id="b-amount" name="amount" inputmode="decimal" placeholder="$0.00" value="' + (b.amount !== '' ? money(+b.amount) : '') + '" required></div>' +
-      '<div class="field"><label for="b-day">Due day</label><input id="b-day" name="day" inputmode="numeric" placeholder="1 to 31" value="' + esc(b.dueDay) + '" required></div>' +
+      '<div class="field"><label for="b-freq">How often</label><select id="b-freq" name="freq">' + BILL_FREQ.map(function (f) { return '<option value="' + f[0] + '"' + ((b.freq || 'monthly') === f[0] ? ' selected' : '') + '>' + f[1] + '</option>'; }).join('') + '</select></div>' +
+      '<div class="field" data-freq="monthly semimonthly"><label for="b-day" id="b-day-label">' + (b.freq === 'semimonthly' ? 'First due day' : 'Due day') + '</label><input id="b-day" name="day" inputmode="numeric" placeholder="1 to 31" value="' + esc(b.dueDay) + '" required></div>' +
+      '<div class="field" data-freq="semimonthly"><label for="b-day2">Second due day</label><input id="b-day2" name="day2" inputmode="numeric" placeholder="1 to 31" value="' + esc(b.dueDay2 || '') + '" required></div>' +
+      '<div class="field" data-freq="weekly biweekly quarterly yearly"><label for="b-start">Next due date</label><input id="b-start" name="start" type="date" value="' + esc(b.start || '') + '" required></div>' +
       '<div class="field"><label for="b-ess">Essential</label><input id="b-ess" name="essential" type="checkbox"' + (b.essential ? ' checked' : '') + '></div>' +
       '<div class="field"><label for="b-match">On bank statement</label><input id="b-match" name="match" placeholder="Optional" value="' + esc(b.match || '') + '" maxlength="80"></div>' +
       accountField('b-acct', b.account, 'Pays from', id ? accountFor(b) || 'Optional' : 'Optional') + '</div>' +
       '<div class="section-foot">Essential bills are things like rent, power and insurance. Payday lists them first when money is tight. "On bank statement" is the text your bank shows for this payment, like ATT*BILL. Separate a few with commas. It helps Payday match imported payments.</div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-bill" data-id="' + id + '">Delete bill</button>' : '');
+    setTimeout(billFreqFields, 0);
     openSheet(id ? 'Edit bill' : 'New bill', body, { saveLabel: 'Save', onSave: function (fd) {
-      var amt = num(fd.get('amount')), day = parseInt(fd.get('day'), 10), name = String(fd.get('name') || '').trim();
-      if (!name || !(amt >= 0) || !(day >= 1 && day <= 31)) { toast('Add a name, an amount, and a due day from 1 to 31.'); return false; }
+      var freq = String(fd.get('freq') || 'monthly'), byDay = freq === 'monthly' || freq === 'semimonthly';
+      var amt = num(fd.get('amount')), day = parseInt(fd.get('day'), 10), day2 = parseInt(fd.get('day2'), 10), start = String(fd.get('start') || ''), name = String(fd.get('name') || '').trim();
+      if (!name || !(amt >= 0)) { toast('Add a name and an amount.'); return false; }
+      if (byDay && !(day >= 1 && day <= 31)) { toast('Add a due day from 1 to 31.'); return false; }
+      if (freq === 'semimonthly' && !(day2 >= 1 && day2 <= 31 && day2 !== day)) { toast('Add a second due day from 1 to 31.'); return false; }
+      if (!byDay && !/^\d{4}-\d{2}-\d{2}$/.test(start)) { toast('Pick the next due date.'); return false; }
+      if (!byDay) day = parse(start).getDate();
       var curB = id && state.bills.find(function (x) { return x.id === id; });
-      var vals = { name: name, amount: amt, dueDay: day, essential: !!fd.get('essential'), variable: fd.get('type') === 'variable', match: String(fd.get('match') || '').trim(), account: String(fd.get('account') || '').trim() };
-      if (curB) Object.assign(curB, vals);
+      var vals = { name: name, amount: amt, dueDay: day, freq: freq, dueDay2: freq === 'semimonthly' ? day2 : undefined, start: byDay ? undefined : start, essential: !!fd.get('essential'), variable: fd.get('type') === 'variable', match: String(fd.get('match') || '').trim(), account: String(fd.get('account') || '').trim() };
+      Object.keys(vals).forEach(function (k) { if (vals[k] === undefined) delete vals[k]; });
+      if (curB) { delete curB.dueDay2; delete curB.start; Object.assign(curB, vals); }
       else state.bills.push(Object.assign({ id: uid() }, vals));
       render(); save(id ? 'Bill updated' : 'Bill added');
     } });
@@ -1500,6 +1551,7 @@ button.row:active { background: var(--surface-2); }
     if (e.target.id === 'p-q') { purch.q = e.target.value; var l = document.getElementById('p-list'); if (l) l.innerHTML = purchaseRows(ymOf(monthOffset)); }
   });
   document.addEventListener('change', function (e) {
+    if (e.target.id === 'b-freq') { billFreqFields(); return; }
     if (e.target.id !== 'txn-file' || !e.target.files || !e.target.files[0]) return;
     var file = e.target.files[0], reader = new FileReader();
     if (file.size > 5e6) { toast('That file is too large. Export a shorter date range and try again.'); e.target.value = ''; return; }
@@ -1599,7 +1651,7 @@ button.row:active { background: var(--surface-2); }
       document.getElementById('b-type').value = t.dataset.v;
       t.parentNode.querySelectorAll('button').forEach(function (bt) { var on = bt === t; bt.classList.toggle('on', on); bt.setAttribute('aria-checked', String(on)); });
       document.getElementById('b-amount-label').textContent = isVar ? 'Estimate' : 'Amount';
-      document.getElementById('b-type-note').textContent = isVar ? 'Changes month to month, like power or water. Enter your best estimate.' : 'Same amount every month, like rent or a subscription.';
+      document.getElementById('b-type-note').textContent = isVar ? 'Changes from bill to bill, like power or water. Enter your best estimate.' : 'Same amount each time, like rent or a subscription.';
       return;
     }
     if (a === 'reserve') { state.reserved[t.dataset.date] = +t.dataset.amt; render(); save('Marked ' + money(+t.dataset.amt) + ' set aside'); return; }
