@@ -310,6 +310,22 @@ button.row:active { background: var(--surface-2); }
     return out.sort(function (a, b) { return b.score - a.score || Math.abs(daysBetween(it.due, a.t.date)) - Math.abs(daysBetween(it.due, b.t.date)); });
   }
   function bestMatch(it) { if (!txns.length) return null; var c = candidates(it, false); return c.length ? c[0].t : null; }
+  // Every outgoing payment near the due date, or anywhere when searching by name or amount.
+  function pickList(it, q) {
+    var linked = linkedMap(), from = addDays(it.due, -45), to = addDays(it.due, 20), qn = num(q);
+    q = String(q || '').toLowerCase().trim();
+    return txns.filter(function (t) {
+      if (!(t.amount > 0) || (linked[t.transaction_id] && linked[t.transaction_id] !== it.key)) return false;
+      if (!q) return t.date >= from && t.date <= to;
+      return (String(t.name || '') + ' ' + String(t.merchant_name || '')).toLowerCase().indexOf(q) >= 0 || (qn > 0 && Math.abs(t.amount - qn) < 0.005);
+    }).slice(0, 80);
+  }
+  // Short text naming who a payment went to, like "Apple Card" or "PROG NORTHERN", saved as the bill's "On bank statement".
+  function payeeText(t) {
+    if (t.merchant_name) return String(t.merchant_name).slice(0, 80);
+    var n = String(t.name || '').replace(/^(MOBILE PURCHASE|PURCHASE|CHECKCARD)(\s+\d{4})?\s+/i, '').split(/\s+DES:|\s+ID:|\s+#|\s+X{3,}|\s+\d{3,}/)[0].trim();
+    return n.length >= 3 ? n.slice(0, 80) : '';
+  }
   function pendingMatches() { var M = build(), out = [], used = {}; if (!M) return out; M.checks.forEach(function (c) { c.items.forEach(function (it) { if (it.match && !used[it.match.transaction_id]) { used[it.match.transaction_id] = 1; out.push(it); } }); }); return out; }
   function debtById(id) { return state.debts.find(function (x) { return x.id === id; }); }
   function setPaid(it, p) {
@@ -868,6 +884,21 @@ button.row:active { background: var(--surface-2); }
     if (M) M.checks.forEach(function (c) { c.items.forEach(function (x) { if (x.key === key) { it = x; check = c; } }); });
     return { it: it, check: check, M: M };
   }
+  function txnRow(k, t, extra) {
+    return '<button type="button" class="row plain" data-act="link" data-key="' + k + '" data-txn="' + esc(t.transaction_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(t.name) + '</span><span class="sub muted" style="display:block">' + fmtDay(t.date) + ' · ' + esc(t.account_name || '') + '</span></span><span class="row-end"><span class="row-amount">' + money(t.amount) + '</span>' + (extra || '') + '</span></button>';
+  }
+  function pickButton(k, label) {
+    return txns.length ? '<div class="list"><button type="button" class="row plain" data-act="pick" data-key="' + k + '"><span class="row-main" style="color:var(--accent)">' + label + '</span>' + I.chev + '</button></div>' : '';
+  }
+  function pickSheet(key) {
+    var r = findItem(key); if (!r) return;
+    var it = r.it, k = esc(key);
+    var rows = function (q) { var l = pickList(it, q); return l.length ? l.map(function (t) { return txnRow(k, t); }).join('') : '<div class="empty">' + (q ? 'No payments match that search.' : 'No bank payments around this due date. Search to look further.') + '</div>'; };
+    openSheet('Choose payment', '<div class="sub muted" style="padding-inline:4px">' + esc(it.name) + ' · ' + money(it.planned) + ' due ' + fmtShort(it.due) + '</div>' +
+      '<div class="list"><div class="field"><label for="pick-q">Search</label><input id="pick-q" type="search" placeholder="Name or amount" autocomplete="off"></div></div>' +
+      '<div class="section"><div class="list" id="pick-list">' + rows('') + '</div><div class="section-foot">Showing payments from ' + fmtShort(addDays(it.due, -45)) + ' to ' + fmtShort(addDays(it.due, 20)) + '. Search to look further back. Payday remembers who you paid and suggests it for this bill next month.</div></div>', { focus: false });
+    document.getElementById('pick-q').addEventListener('input', function (e) { document.getElementById('pick-list').innerHTML = rows(e.target.value); });
+  }
   function itemSheet(key) {
     var r = findItem(key); if (!r) return;
     var it = r.it, check = r.check, pays = r.M ? r.M.pays : [], idx = check ? check.index : -1;
@@ -878,13 +909,12 @@ button.row:active { background: var(--surface-2); }
     if (paid) {
       if (it.txn) {
         var t = txnById[it.txn];
-        b += '<div class="section"><div class="section-label">Linked bank payment</div><div class="list"><div class="txn-row"><div class="row-main"><div class="row-title">' + esc(t ? t.name : 'Imported payment') + '</div><div class="sub muted">' + (t ? fmtDay(t.date) + ' · ' + esc(t.account_name || '') : 'No longer in your imports') + '</div></div><div class="row-amount">' + (t ? money(t.amount) : '') + '</div></div></div></div>';
+        b += '<div class="section"><div class="section-label">Linked bank payment</div><div class="list"><div class="txn-row"><div class="row-main"><div class="row-title">' + esc(t ? t.name : 'Imported payment') + '</div><div class="sub muted">' + (t ? fmtDay(t.date) + ' · ' + esc(t.account_name || '') : 'No longer in your imports') + '</div></div><div class="row-amount">' + (t ? money(t.amount) : '') + '</div></div></div>' + pickButton(k, 'Choose a different payment') + '</div>';
       }
       if (!it.txn) {
         var pc = candidates(it, true).slice(0, 3);
-        if (pc.length) b += '<div class="section"><div class="section-label">Link a bank payment</div><div class="list">' + pc.map(function (c) {
-          return '<button type="button" class="row plain" data-act="link" data-key="' + k + '" data-txn="' + esc(c.t.transaction_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(c.t.name) + '</span><span class="sub muted" style="display:block">' + fmtDay(c.t.date) + ' · ' + esc(c.t.account_name || '') + '</span></span><span class="row-amount">' + money(c.t.amount) + '</span></button>';
-        }).join('') + '</div><div class="section-foot">Linking replaces the amount below with the bank amount.</div></div>';
+        b += '<div class="section"><div class="section-label">Link a bank payment</div>' + (pc.length ? '<div class="list">' + pc.map(function (c) { return txnRow(k, c.t); }).join('') + '</div>' : '') +
+          pickButton(k, pc.length ? 'Choose a different payment' : 'Choose a bank payment') + '<div class="section-foot">Linking replaces the amount below with the bank amount.</div></div>';
       }
       b += '<div class="section"><div class="section-label">What you paid</div><div class="list"><div class="field"><label for="i-amt">Amount paid</label><input id="i-amt" inputmode="decimal" value="' + money(it.paidAmount) + '"></div></div></div>';
       b += '<div class="actions"><button type="button" class="btn filled" data-act="save-paid" data-key="' + k + '">Save amount</button>' +
@@ -892,9 +922,9 @@ button.row:active { background: var(--surface-2); }
         '<button type="button" class="btn tinted" data-act="unpay" data-key="' + k + '">Mark as not paid</button></div>';
     } else {
       var cands = candidates(it, true).slice(0, 4);
-      if (cands.length) b += '<div class="section"><div class="section-label">Link a bank payment</div><div class="list">' + cands.map(function (c, i) {
-        return '<button type="button" class="row plain" data-act="link" data-key="' + k + '" data-txn="' + esc(c.t.transaction_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(c.t.name) + '</span><span class="sub muted" style="display:block">' + fmtDay(c.t.date) + ' · ' + esc(c.t.account_name || '') + '</span></span><span class="row-end"><span class="row-amount">' + money(c.t.amount) + '</span>' + (i === 0 && c.score >= 3 ? badge('accent', 'Best match') : '') + '</span></button>';
-      }).join('') + '</div><div class="section-foot">Tap a payment to mark this bill paid with that amount.</div></div>';
+      if (txns.length) b += '<div class="section"><div class="section-label">Link a bank payment</div>' + (cands.length ? '<div class="list">' + cands.map(function (c, i) {
+        return txnRow(k, c.t, i === 0 && c.score >= 3 ? badge('accent', 'Best match') : '');
+      }).join('') + '</div>' : '') + pickButton(k, cands.length ? 'Choose a different payment' : 'Choose a bank payment') + '<div class="section-foot">Tap a payment to mark this bill paid with that amount.</div></div>';
       b += '<div class="section"><div class="section-label">' + (it.variable ? (it.estimated ? 'Variable bill. Your estimate is ' + money(it.estimate) + '.' : 'Variable bill. Estimate was ' + money(it.estimate) + '.') : 'Or enter it yourself') + '</div><div class="list"><div class="field"><label for="i-amt">' + (it.variable ? 'This month' : 'Amount paid') + '</label><input id="i-amt" inputmode="decimal" placeholder="' + money(it.planned) + '" value="' + (it.estimated ? '' : money(it.planned)) + '"></div></div>' +
         '<div class="section-foot">' + (it.variable ? 'Enter the amount on this month\'s bill. Save it now, or mark it paid once you pay.' : 'Change this if you paid a different amount.') + '</div></div>';
       b += '<div class="actions"><button type="button" class="btn filled" data-act="pay" data-key="' + k + '">Mark paid</button>';
@@ -1023,13 +1053,18 @@ button.row:active { background: var(--surface-2); }
     if (a === 'link') {
       var rl = findItem(key), tx = txnById[t.dataset.txn]; if (!rl || !tx) return;
       setPaid(rl.it, { on: tx.date, amount: tx.amount, txn: tx.transaction_id });
-      render(); save('Linked. Paid ' + money(tx.amount) + ' on ' + fmtShort(tx.date));
+      // Remember who this bill is paid to so next month's payment is suggested for it.
+      var srcObj = rl.it.kind === 'debt' ? debtById(rl.it.id) : state.bills.find(function (x) { return x.id === rl.it.id; });
+      var payee = srcObj && !srcObj.match ? payeeText(tx) : '';
+      if (payee) srcObj.match = payee;
+      render(); save('Linked. Paid ' + money(tx.amount) + ' on ' + fmtShort(tx.date) + (payee ? '. Payments to ' + payee + ' will be suggested for ' + rl.it.name + '.' : ''));
       if (t.dataset.from === 'review') reviewSheet(); else closeSheet();
       return;
     }
     if (a === 'unlink') { var up = state.paid[key]; if (up) state.paid[key] = { on: up.on, amount: up.amount }; closeSheet(); render(); save('Unlinked. The amount paid stays the same.'); return; }
     if (a === 'notmatch') { (state.notMatch[key] = state.notMatch[key] || []).push(t.dataset.txn); render(); save(); reviewSheet(); return; }
     if (a === 'review') { reviewSheet(); return; }
+    if (a === 'pick') { pickSheet(key); return; }
     if (a === 'plaid-connect') { openLink(); return; }
     if (a === 'sign-out') { signOut(); return; }
     if (a === 'sign-out-all') { confirmSheet('Sign out everywhere', 'Every phone and computer signed in to Payday will need the password again, including this one.', 'Sign out everywhere', function () { api('POST', '/api/logout-everywhere').catch(function () {}).then(function () { setToken(null); showLogin(); }); }); return; }
