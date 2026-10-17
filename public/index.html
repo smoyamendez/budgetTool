@@ -267,7 +267,7 @@ button.row:active { background: var(--surface-2); }
       while (d <= to) { if (d >= from) out.push(d); d = addDays(d, step); }
     } else {
       var a = parse(from), anchor = parse(S.nextPayDate).getDate();
-      for (var i = -1; i < 9; i++) {
+      for (var i = -1; i < 20; i++) {
         var mm = a.getMonth() + i, yy = a.getFullYear() + Math.floor(mm / 12), mo = ((mm % 12) + 12) % 12;
         var days = f === 'semimonthly' ? [15, lastDay(yy, mo)] : [Math.min(anchor, lastDay(yy, mo))];
         days.forEach(function (dd) { var s = yy + '-' + pad(mo + 1) + '-' + pad(dd); if (s >= from && s <= to) out.push(s); });
@@ -675,7 +675,8 @@ button.row:active { background: var(--surface-2); }
   }
   function build() {
     var S = state.settings;
-    var pays = paydays(S, addDays(TODAY, -70), addDays(TODAY, 140));
+    // About 6 paychecks back and a year ahead.
+    var pays = paydays(S, addDays(TODAY, -100), addDays(TODAY, 380));
     if (!pays.length) return null;
     var cur = 0;
     pays.forEach(function (p, i) { if (p <= TODAY) cur = i; });
@@ -723,7 +724,25 @@ button.row:active { background: var(--surface-2); }
       c.coveredFrom = pv && c.coveredIn > 0 ? pv.date : null;
       c.setAside = state.reserved[c.date] != null;
       c.spendable = c.left - c.reserve + c.coveredIn;
-      c.suggested = target && !c.extraDone ? Math.max(0, Math.min(target.balance, c.spendable - (+S.buffer || 0))) : 0;
+    });
+    // Extra payments carry forward: each paycheck's extra lowers the balance the next one sees,
+    // and once a debt is paid off the next one in line becomes the target. Interest is ignored here.
+    var bal = {};
+    state.debts.forEach(function (d) { bal[d.id] = Math.max(0, +d.balance || 0); });
+    checks.forEach(function (c, i) {
+      if (i < cur) { c.target = target; c.suggested = target && !c.extraDone ? Math.max(0, Math.min(target.balance, c.spendable - (+S.buffer || 0))) : 0; return; }
+      c.items.forEach(function (it) { if (it.kind === 'debt' && it.status !== 'paid' && bal[it.id] != null) bal[it.id] = Math.max(0, bal[it.id] - it.amount); });
+      var live = state.debts.filter(function (d) { return bal[d.id] > 0.004; }).map(function (d) { return Object.assign({}, d, { balance: bal[d.id] }); });
+      c.target = debtOrder(live, S.strategy)[0] || null;
+      if (c.target) c.target = Object.assign({}, debtById(c.target.id), { balance: bal[c.target.id] });
+      if (c.extraDone) return;
+      c.suggested = c.target ? Math.max(0, Math.min(bal[c.target.id], c.spendable - (+S.buffer || 0))) : 0;
+      // This paycheck can only suggest what's really in checking.
+      if (i === cur) {
+        c.reality = realityFor(c);
+        if (c.reality) { c.realLimited = c.reality.free < c.suggested; c.suggested = Math.max(0, Math.min(c.suggested, Math.floor(c.reality.free))); }
+      }
+      if (c.target) bal[c.target.id] -= c.suggested;
     });
     return { pays: pays, cur: cur, checks: checks, target: target, order: order };
   }
@@ -813,13 +832,11 @@ button.row:active { background: var(--surface-2); }
   function homeView() {
     var M = build();
     if (!M) return onboarding();
-    var minOff = -Math.min(M.cur, 2), maxOff = Math.min(5, M.checks.length - 2 - M.cur);
+    var minOff = -Math.min(M.cur, 6), maxOff = Math.min(26, M.checks.length - 2 - M.cur);
     payOffset = Math.max(minOff, Math.min(maxOff, payOffset));
     var c = M.checks[M.cur + payOffset];
     var name = payOffset === 0 ? 'This paycheck' : payOffset === 1 ? 'Next paycheck' : payOffset < 0 ? 'Past paycheck' : 'Coming paycheck';
-    var R = payOffset === 0 ? realityFor(c) : null;
-    // Only suggest extra debt payments from money that's actually in checking.
-    if (R && !c.extraDone) { c.realLimited = R.free < c.suggested; c.suggested = Math.max(0, Math.min(c.suggested, Math.floor(R.free))); }
+    var R = payOffset === 0 ? (c.reality || realityFor(c)) : null;
     var short = (R ? R.free : c.spendable) < -0.004;
     var used = c.assigned + (c.extraDone ? c.extraDone.amount : 0) + c.reserve - c.coveredIn;
     var share = c.amount > 0 ? Math.max(0, Math.min(1, used / c.amount)) : (used > 0 ? 1 : 0);
@@ -907,7 +924,7 @@ button.row:active { background: var(--surface-2); }
   function payChips(M, minOff, maxOff) {
     var h = '';
     for (var o = minOff; o <= maxOff; o++) {
-      var ck = M.checks[M.cur + o], tag = o === 0 ? 'Now' : o === 1 ? 'Next' : o < 0 ? 'Past' : '';
+      var ck = M.checks[M.cur + o], tag = o === 0 ? 'Now' : o === 1 ? 'Next' : o < 0 ? 'Past' : ck.date.slice(0, 4) !== TODAY.slice(0, 4) ? ck.date.slice(0, 4) : '';
       h += '<button class="chip' + (o === payOffset ? ' on' : '') + '" data-act="pay-go" data-off="' + o + '" aria-pressed="' + (o === payOffset) + '">' + fmtShort(ck.date) + (tag ? '<small>' + tag + '</small>' : '<small>&nbsp;</small>') + '</button>';
     }
     return '<div class="chips" role="group" aria-label="Paychecks">' + h + '</div>';
@@ -951,7 +968,7 @@ button.row:active { background: var(--surface-2); }
     var bills = 0, mins = 0, buf = +state.settings.buffer || 0;
     c.items.forEach(function (it) { if (it.kind === 'debt') mins += it.amount; else bills += it.amount; });
     var extra = c.extraDone ? c.extraDone.amount : c.suggested;
-    var extraTo = c.extraDone ? (debtById(c.extraDone.debtId) || {}).name : M.target && M.target.name;
+    var extraTo = c.extraDone ? (debtById(c.extraDone.debtId) || {}).name : c.target && c.target.name;
     var left = c.spendable - buf - (c.extraDone ? 0 : c.suggested);
     var row = function (l, v, cls) { return '<div' + (cls ? ' class="' + cls + '"' : '') + '><span>' + l + '</span><span>' + v + '</span></div>'; };
     var out = function (v) { return '&minus;' + money(v); };
@@ -976,7 +993,7 @@ button.row:active { background: var(--surface-2); }
     };
     c.items.forEach(function (it) { if (it.status !== 'paid') add(accountFor(it.src), it.amount, it.name, it.due); });
     state.budget.forEach(function (b) { add(b.account || home, (+b.amount || 0) / ppm, b.name, null); });
-    if (!c.extraDone && c.suggested > 0.004 && M.target) add(M.target.account || home, c.suggested, 'Extra to ' + M.target.name, null);
+    if (!c.extraDone && c.suggested > 0.004 && c.target) add(c.target.account || home, c.suggested, 'Extra to ' + c.target.name, null);
     if (!by.length) return '';
     by.sort(function (a, b) { return sameAcct(a.name, home) ? -1 : sameAcct(b.name, home) ? 1 : b.total - a.total; });
     var h = by.map(function (g) {
@@ -1073,10 +1090,10 @@ button.row:active { background: var(--surface-2); }
       return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">' + money(c.extraDone.amount) + ' went to ' + esc(d ? d.name : 'a debt') + '.</div></div>' + badge('paid') + '</div>' +
         '<button class="btn tinted" data-act="undo-extra" data-date="' + c.date + '">Undo</button></section>';
     }
-    if (!M.target) return state.debts.length ? '<section class="card"><div class="headline">No debt left</div><div class="sub muted">Every balance is at zero. What\'s left is yours.</div></section>' : '';
+    if (!c.target) return state.debts.length ? '<section class="card"><div class="headline">No debt left</div><div class="sub muted">Every balance is at zero. What\'s left is yours.</div></section>' : '';
     if (c.suggested < 1 && c.realLimited) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Not right now. What\'s in checking has to cover the bills and savings above first. Minimums still keep you on track.</div></section>';
     if (c.suggested < 1) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Nothing extra this paycheck after bills and your ' + money(+state.settings.buffer || 0) + ' spending money. Minimums still keep you on track.</div></section>';
-    return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + money(c.suggested) + ' toward ' + esc(M.target.name) + (M.target.apr ? ' (' + M.target.apr + '% APR)' : '') + '.' + (c.realLimited ? ' That\'s what your checking balance can spare right now.' : '') + ' You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div></div>' + badge('debt', 'Pay first') + '</div>' +
+    return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + money(c.suggested) + ' toward ' + esc(c.target.name) + (c.target.apr ? ' (' + c.target.apr + '% APR)' : '') + (c.index > M.cur ? ', ' + money(c.target.balance) + ' left on it by then' : '') + '.' + (c.realLimited ? ' That\'s what your checking balance can spare right now.' : '') + ' You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div></div>' + badge('debt', 'Pay first') + '</div>' +
       '<button class="btn filled" data-act="do-extra" data-date="' + c.date + '">Mark ' + money(c.suggested) + ' paid</button></section>';
   }
   var billsMode = 'bills';
@@ -1418,7 +1435,13 @@ button.row:active { background: var(--surface-2); }
     renderTabs();
     var app = document.getElementById('app');
     guessCache = null;
+    var chipsLeft = (document.querySelector('.chips') || {}).scrollLeft;
     app.innerHTML = tab === 'home' ? homeView() : tab === 'bills' ? billsView() : tab === 'debt' ? debtView() : tab === 'accounts' ? accountsView() : settingsView();
+    var row = document.querySelector('.chips'), on = row && row.querySelector('.chip.on');
+    if (row && on) {
+      if (chipsLeft != null) row.scrollLeft = chipsLeft;
+      if (on.offsetLeft < row.scrollLeft || on.offsetLeft + on.offsetWidth > row.scrollLeft + row.clientWidth) row.scrollLeft = on.offsetLeft - (row.clientWidth - on.offsetWidth) / 2;
+    }
   }
 
   // ---------- sheets ----------
@@ -1727,8 +1750,8 @@ button.row:active { background: var(--surface-2); }
     if (a === 'reset-amount') { delete state.payAmounts[t.dataset.date]; closeSheet(); render(); save('Back to your usual amount'); return; }
     if (a === 'do-extra') {
       var M = build(), c = M && M.checks.find(function (x) { return x.date === t.dataset.date; });
-      if (!c || !M.target || c.suggested < 1) return;
-      var amt = Math.round(c.suggested * 100) / 100, tgt = state.debts.find(function (x) { return x.id === M.target.id; });
+      if (!c || !c.target || c.suggested < 1) return;
+      var amt = Math.round(c.suggested * 100) / 100, tgt = state.debts.find(function (x) { return x.id === c.target.id; });
       state.extra[c.date] = { debtId: tgt.id, amount: amt }; tgt.balance = Math.max(0, +tgt.balance - amt);
       render(); save(money(amt) + ' put toward ' + tgt.name); return;
     }
