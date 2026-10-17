@@ -301,7 +301,13 @@ button.row:active { background: var(--surface-2); }
     txns.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; });
     txnById = {}; txns.forEach(function (t) { txnById[t.transaction_id] = t; });
   }
-  function linkedMap() { var m = {}; Object.keys(state.paid).forEach(function (k) { var p = state.paid[k]; if (p && p.txn) m[p.txn] = k; }); return m; }
+  // Bank payments linked to a bill or debt. Links left behind by deleted bills don't count.
+  function linkedMap() {
+    var m = {}, live = {};
+    state.bills.concat(state.debts).forEach(function (x) { live[x.id] = 1; });
+    Object.keys(state.paid).forEach(function (k) { var p = state.paid[k]; if (p && p.txn && live[k.slice(0, k.lastIndexOf('@'))]) m[p.txn] = k; });
+    return m;
+  }
   function tokens(str) { return String(str || '').toLowerCase().split(/[\s,\-\/]+/).map(function (w) { return w.replace(/[^a-z0-9]/g, ''); }).filter(function (w) { return w.length >= 3 && !STOP[w]; }); }
   function nameHit(it, t) {
     var hay = (String(t.merchant_name || '') + ' ' + String(t.name || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -797,6 +803,47 @@ button.row:active { background: var(--surface-2); }
     }
     h += extraCard(c, M);
     h += accountSplit(c, M);
+    h += spentSection(c);
+    return h;
+  }
+  // What actually left (and arrived) between this payday and the next, from your bank and card transactions.
+  var spentSrc = 'bank';
+  function spentSection(c) {
+    if (c.date > TODAY || !txns.length) return '';
+    var linked = linkedMap(), names = {}, sums = { bill: 0, budget: 0, other: 0, in: 0, paid: 0 };
+    state.budget.forEach(function (b) { names[b.id] = b.name; });
+    // Links to bills you've since deleted don't count.
+    var srcName = function (key) { var id = key.slice(0, key.lastIndexOf('@')), x = state.bills.find(function (b) { return b.id === id; }) || debtById(id); return x ? x.name : ''; };
+    var list = txns.filter(function (t) {
+      if (t.date < c.date || t.date > c.end || !t.amount) return false;
+      var card = isOwed(kindOfName(t.account_name));
+      return spentSrc === 'all' || (spentSrc === 'card') === card;
+    });
+    var rows = list.map(function (t) {
+      var key = linked[t.transaction_id]; if (key && !srcName(key)) key = null;
+      var owedAcct = isOwed(kindOfName(t.account_name)), r = !key && (counts(t, {}) || state.txnBudget[t.transaction_id]) ? bucketFor(t) : null, tag, act;
+      if (key) { tag = badge('paid', srcName(key)); act = 'data-act="item" data-key="' + esc(key) + '"'; if (t.amount > 0) sums.bill += t.amount; }
+      else if (t.amount < 0 && !r && owedAcct) { tag = badge('', 'Payment'); act = 'data-act="txn" data-txn="' + esc(t.transaction_id) + '"'; sums.paid -= t.amount; }
+      else if (t.amount < 0 && !r) { tag = badge('paid', 'Money in'); act = 'data-act="txn" data-txn="' + esc(t.transaction_id) + '"'; sums.in -= t.amount; }
+      else if (r && r.id !== 'none') { tag = badge('debt', names[r.id] || 'Bucket'); act = 'data-act="txn" data-txn="' + esc(t.transaction_id) + '"'; sums.budget += t.amount; }
+      else { tag = badge(r ? '' : isPurchase(t, {}) ? 'due' : '', r ? 'Not budget' : isPurchase(t, {}) ? 'Not sorted' : 'Transfer'); act = 'data-act="txn" data-txn="' + esc(t.transaction_id) + '"'; if (t.amount > 0) sums.other += t.amount; else sums.in -= t.amount; }
+      return '<button type="button" class="row plain" ' + act + '><span class="row-main"><span class="row-title" style="display:block">' + esc(t.merchant_name || t.name) + '</span><span class="sub muted" style="display:block">' + fmtShort(t.date) + (t.pending ? ' · pending' : '') + ' · ' + esc(t.account_name || '') + '</span></span>' +
+        '<span class="row-end"><span class="row-amount">' + (t.amount < 0 ? '+' + money(-t.amount) : money(t.amount)) + '</span>' + tag + '</span></button>';
+    });
+    var out = sums.bill + sums.budget + sums.other, row = function (l, v, cls) { return '<div' + (cls ? ' class="' + cls + '"' : '') + '><span>' + l + '</span><span>' + v + '</span></div>'; };
+    var h = '<div class="section" id="spent"><div class="section-label">What came out ' + fmtShort(c.date) + ' to ' + fmtShort(c.end > TODAY ? TODAY : c.end) + '</div>' +
+      '<div class="seg" role="tablist" aria-label="Which accounts">' + [['bank', 'Bank'], ['card', 'Cards'], ['all', 'All']].map(function (f) {
+        return '<button role="tab" data-act="spent-src" data-v="' + f[0] + '" aria-selected="' + (spentSrc === f[0]) + '" class="' + (spentSrc === f[0] ? 'on' : '') + '">' + f[1] + '</button>';
+      }).join('') + '</div>';
+    if (!list.length) return h + '<div class="list"><div class="empty">No ' + (spentSrc === 'card' ? 'card ' : spentSrc === 'bank' ? 'bank ' : '') + 'transactions in these dates' + (c.end >= TODAY ? ' yet' : '') + '.</div></div></div>';
+    h += '<section class="card"><div class="ledger">' + (sums.in > 0.004 || spentSrc !== 'card' ? row('Came in', '+' + money(sums.in)) : '') +
+      (sums.paid > 0.004 ? row('Payments to cards and loans', money(sums.paid)) : '') +
+      (sums.bill > 0.004 ? row('Bills and card payments', '&minus;' + money(sums.bill)) : '') +
+      (sums.budget > 0.004 ? row('Budget buckets', '&minus;' + money(sums.budget)) : '') +
+      (sums.other > 0.004 ? row('Transfers and unsorted', '&minus;' + money(sums.other)) : '') +
+      (spentSrc === 'card' ? row('Charged', money(out), 'total') : row('Net', money(sums.in - out), 'total' + (sums.in - out < -0.004 ? ' short' : ''))) + '</div></section>' +
+      '<div class="list" role="list">' + rows.join('') + '</div>' +
+      '<div class="section-foot">' + list.length + ' transactions. Tap one to link it to a bill or move it to a bucket. Card purchases are paid later through your card payment, so they\'re under Cards.</div></div>';
     return h;
   }
   function payChips(M, minOff, maxOff) {
@@ -1566,6 +1613,7 @@ button.row:active { background: var(--surface-2); }
     if (a === 'del-budget') { var gi = t.dataset.id; state.budget = state.budget.filter(function (b) { return b.id !== gi; }); Object.keys(state.txnBudget).forEach(function (k) { if (state.txnBudget[k] === gi) delete state.txnBudget[k]; }); closeSheet(); render(); save('Budget item deleted'); return; }
     if (a === 'bills-mode') { billsMode = t.dataset.v; render(); window.scrollTo(0, 0); return; }
     if (a === 'txn') { txnSheet(t.dataset.txn); return; }
+    if (a === 'spent-src') { spentSrc = t.dataset.v; render(); var sp2 = document.getElementById('spent'); if (sp2) sp2.scrollIntoView(); return; }
     if (a === 'purch-filter') { purch.filter = t.dataset.v; render(); return; }
     if (a === 'purch-other') { purch.other = !purch.other; render(); return; }
     if (a === 'go-sort') { tab = 'bills'; billsMode = 'budget'; monthOffset = 0; purch.filter = 'unsorted'; render(); var el = document.getElementById('purchases'); if (el) el.scrollIntoView(); return; }
