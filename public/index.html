@@ -227,14 +227,14 @@ button.row:active { background: var(--surface-2); }
   var state = null, docRef = null, saveTimer = null, tab = 'home', payOffset = 0, storeOk = false;
   function emptyState() {
     return { settings: { payAmount: 0, frequency: 'biweekly', nextPayDate: '', buffer: 0, strategy: 'avalanche', trackFrom: '', examples: false },
-      bills: [], debts: [], budget: [], paid: {}, moves: {}, payAmounts: {}, extra: {}, reserved: {}, actuals: {}, notMatch: {} };
+      bills: [], debts: [], budget: [], paid: {}, moves: {}, payAmounts: {}, extra: {}, reserved: {}, actuals: {}, notMatch: {}, txnBudget: {} };
   }
   function normalize(d) {
     var s = emptyState();
     d = d || {};
     s.settings = Object.assign(s.settings, d.settings || {});
     ['bills', 'debts', 'budget'].forEach(function (k) { if (Array.isArray(d[k])) s[k] = d[k]; });
-    ['paid', 'moves', 'payAmounts', 'extra', 'reserved', 'actuals', 'notMatch'].forEach(function (k) { if (d[k] && typeof d[k] === 'object') s[k] = Object.assign({}, d[k]); });
+    ['paid', 'moves', 'payAmounts', 'extra', 'reserved', 'actuals', 'notMatch', 'txnBudget'].forEach(function (k) { if (d[k] && typeof d[k] === 'object') s[k] = Object.assign({}, d[k]); });
     Object.keys(s.paid).forEach(function (k) { var v = s.paid[k]; if (!v || typeof v !== 'object') s.paid[k] = { on: typeof v === 'string' ? v : TODAY, amount: null }; });
     s.bills = s.bills.map(function (b) { return Object.assign({}, b); });
     s.debts = s.debts.map(function (b) { return Object.assign({}, b); });
@@ -381,6 +381,42 @@ button.row:active { background: var(--surface-2); }
     }
     return guessCache[src.id] || payAccount();
   }
+  // ---------- spending buckets ----------
+  // Plaid's categories. Transfers, card payments and income are never budget spending.
+  var CAT_LABEL = { FOOD_AND_DRINK: 'Food and drink', GENERAL_MERCHANDISE: 'Shopping', TRANSPORTATION: 'Gas and transportation', ENTERTAINMENT: 'Entertainment',
+    PERSONAL_CARE: 'Personal care', MEDICAL: 'Medical', HOME_IMPROVEMENT: 'Home', GENERAL_SERVICES: 'Services', TRAVEL: 'Travel', RENT_AND_UTILITIES: 'Rent and utilities',
+    BANK_FEES: 'Fees and interest', GOVERNMENT_AND_NON_PROFIT: 'Government and donations', OTHER: 'Other' };
+  function isPurchase(t, linked) {
+    if (linked[t.transaction_id] || !t.amount || /DES:P2P|PAYMENT|TRANSFER|AUTOPAY/i.test(t.name || '')) return false;
+    return !!CAT_LABEL[t.category] || (t.amount > 0 && !t.category);
+  }
+  function textHit(list, t) {
+    var hay = (String(t.merchant_name || '') + ' ' + String(t.name || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
+    return String(list || '').split(',').some(function (m) { m = m.toLowerCase().replace(/[^a-z0-9]/g, ''); return m.length >= 2 && hay.indexOf(m) >= 0; });
+  }
+  // A purchase goes where you put it, else to a bucket whose store names match, else to one that takes its Plaid category.
+  function bucketFor(t) {
+    var id = state.txnBudget[t.transaction_id];
+    if (id === 'none') return { id: 'none', how: 'you' };
+    if (id && state.budget.some(function (b) { return b.id === id; })) return { id: id, how: 'you' };
+    var b = state.budget.find(function (x) { return x.match && textHit(x.match, t); });
+    if (b) return { id: b.id, how: 'store' };
+    b = state.budget.find(function (x) { return (x.cats || []).indexOf(t.category) >= 0; });
+    return b ? { id: b.id, how: 'category' } : null;
+  }
+  function monthSpend(ym) {
+    var linked = linkedMap(), out = { by: {}, unsorted: [], total: 0 };
+    state.budget.forEach(function (b) { out.by[b.id] = { total: 0, txns: [] }; });
+    txns.forEach(function (t) {
+      if (t.date.slice(0, 7) !== ym || !isPurchase(t, linked)) return;
+      var r = bucketFor(t);
+      if (!r) { if (t.amount > 0) out.unsorted.push(t); return; }
+      if (r.id === 'none') return;
+      out.by[r.id].total += t.amount; out.by[r.id].txns.push(t); out.total += t.amount;
+    });
+    return out;
+  }
+  function ymOf(off) { var d = new Date(); d = new Date(d.getFullYear(), d.getMonth() + (off || 0), 1); return d.getFullYear() + '-' + pad(d.getMonth() + 1); }
   function accountField(id, val, label, hint) {
     return '<div class="field"><label for="' + id + '">' + label + '</label><input id="' + id + '" name="account" list="' + id + '-list" placeholder="' + esc(hint || 'Optional') + '" value="' + esc(val || '') + '" maxlength="60" autocomplete="off">' +
       '<datalist id="' + id + '-list">' + accountNames().map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist></div>';
@@ -678,9 +714,9 @@ button.row:active { background: var(--surface-2); }
       h += '<div class="section"><div class="section-label">' + g[0] + '</div><div class="list" role="list">' + g[1].map(itemRow).join('') + '</div></div>';
     });
     if (state.budget.length) {
-      var ppm = PER_MONTH[state.settings.frequency] || 1;
+      var ppm = PER_MONTH[state.settings.frequency] || 1, spentNow = monthSpend(ymOf(0));
       h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>Monthly budget</span><span class="num">' + money(c.budget) + '</span></div><div class="list" role="list">' +
-        state.budget.map(function (b) { return '<button class="row plain" data-act="edit-budget" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + money(+b.amount) + ' a month</span></span><span class="row-amount">' + money((+b.amount || 0) / ppm) + '</span></button>'; }).join('') +
+        state.budget.map(function (b) { return '<button class="row plain" data-act="bucket" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + money(spentNow.by[b.id].total) + ' of ' + money(+b.amount) + ' spent this month</span></span><span class="row-amount">' + money((+b.amount || 0) / ppm) + '</span></button>'; }).join('') +
         '</div></div>';
     }
     h += extraCard(c, M);
@@ -789,11 +825,69 @@ button.row:active { background: var(--surface-2); }
     return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + money(c.suggested) + ' toward ' + esc(M.target.name) + (M.target.apr ? ' (' + M.target.apr + '% APR)' : '') + '. You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div></div>' + badge('debt', 'Pay first') + '</div>' +
       '<button class="btn filled" data-act="do-extra" data-date="' + c.date + '">Mark ' + money(c.suggested) + ' paid</button></section>';
   }
+  var billsMode = 'bills';
+  function modeSwitch() {
+    return '<div class="seg" role="tablist" aria-label="Bills or budget">' + [['bills', 'Bills'], ['budget', 'Budget']].map(function (m) {
+      return '<button role="tab" data-act="bills-mode" data-v="' + m[0] + '" aria-selected="' + (billsMode === m[0]) + '" class="' + (billsMode === m[0] ? 'on' : '') + '">' + m[1] + '</button>';
+    }).join('') + '</div>';
+  }
+  function txnLine(t, extra) {
+    return '<button type="button" class="row plain" data-act="txn" data-txn="' + esc(t.transaction_id) + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(t.merchant_name || t.name) + '</span><span class="sub muted" style="display:block">' + fmtShort(t.date) + (t.pending ? ' · pending' : '') + ' · ' + esc(t.account_name || '') + (extra ? ' · ' + extra : '') + '</span></span><span class="row-amount">' + money(t.amount) + '</span></button>';
+  }
+  function budgetView() {
+    var d = new Date(), md = new Date(d.getFullYear(), d.getMonth() + monthOffset, 1), ym = ymOf(monthOffset), label = md.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    var sp = monthSpend(ym), planned = budgetMonthly(), left = planned - sp.total, share = planned > 0 ? Math.min(1, sp.total / planned) : 0;
+    var h = '<div class="head"><h1 class="large-title">Budget</h1><div class="sub muted">' + money(planned) + ' a month across ' + state.budget.length + (state.budget.length === 1 ? ' bucket' : ' buckets') + '</div></div>' + banners() + modeSwitch() +
+      '<div class="section"><div class="month-head"><button class="pager-btn" data-act="month-prev" aria-label="Previous month"' + (monthOffset <= -12 ? ' disabled' : '') + '>' + I.left + '</button>' +
+      '<div class="headline">' + label + '</div><button class="pager-btn" data-act="month-next" aria-label="Next month"' + (monthOffset >= 0 ? ' disabled' : '') + '>' + I.right + '</button></div>' +
+      '<section class="card hero"><div class="foot muted">' + (left < -0.004 ? 'Over budget' : 'Left to spend') + '</div><div class="amount-hero' + (left < -0.004 ? ' short' : '') + '">' + money(Math.abs(left), true) + '</div>' +
+      '<div class="progress' + (left < -0.004 ? ' late' : '') + '" role="progressbar" aria-label="Share of budget spent" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(share * 100) + '"><div style="width:' + (share * 100) + '%"></div></div>' +
+      '<div class="meta"><span>' + money(sp.total) + ' spent of ' + money(planned) + '</span>' + (sp.unsorted.length ? '<span>' + sp.unsorted.length + ' to sort</span>' : '') + '</div></section></div>';
+    if (state.budget.length) {
+      h += '<div class="section"><div class="section-label">Buckets</div><div class="list" role="list">' + state.budget.map(function (b) {
+        var g = sp.by[b.id], amt = +b.amount || 0, rem = amt - g.total, pct = amt > 0 ? Math.min(1, g.total / amt) : (g.total > 0 ? 1 : 0);
+        return '<button class="row plain" data-act="bucket" data-id="' + b.id + '" style="flex-wrap:wrap"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + money(g.total) + ' of ' + money(amt) + ' · ' + g.txns.length + (g.txns.length === 1 ? ' purchase' : ' purchases') + '</span></span>' +
+          '<span class="row-amount"' + (rem < -0.004 ? ' style="color:var(--late)"' : '') + '>' + (rem < -0.004 ? money(-rem) + ' over' : money(rem) + ' left') + '</span>' +
+          '<span class="progress' + (rem < -0.004 ? ' late' : '') + '" style="display:block;flex-basis:100%"><div style="width:' + (pct * 100) + '%"></div></span></button>';
+      }).join('') + '</div><div class="section-foot">Tap a bucket to see its purchases or change its stores and categories.</div></div>';
+    } else h += '<div class="list"><div class="empty">Add buckets like Groceries, Gas or Eating out, then sort your card and bank purchases into them.</div></div>';
+    h += '<button class="btn filled block" data-act="add-budget">Add bucket</button>';
+    if (sp.unsorted.length) {
+      var unsortedTotal = sp.unsorted.reduce(function (s, t) { return s + t.amount; }, 0);
+      h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>Not sorted yet</span><span class="num">' + money(unsortedTotal) + '</span></div><div class="list" role="list">' +
+        sp.unsorted.map(function (t) { return txnLine(t, CAT_LABEL[t.category] || ''); }).join('') + '</div><div class="section-foot">Tap a purchase to put it in a bucket. Bill payments, card payments and transfers aren\'t listed here.</div></div>';
+    }
+    return h;
+  }
+  function bucketSheet(id) {
+    var b = state.budget.find(function (x) { return x.id === id; }); if (!b) return;
+    var g = monthSpend(ymOf(tab === 'bills' ? monthOffset : 0)).by[id], how = { you: 'you moved it', store: 'store', category: 'Plaid label' };
+    var body = '<div class="sub muted" style="padding-inline:4px">' + money(g.total) + ' of ' + money(+b.amount || 0) + ' spent this month</div>' +
+      (g.txns.length ? '<div class="list" role="list">' + g.txns.map(function (t) { return txnLine(t, how[bucketFor(t).how]); }).join('') + '</div>' : '<div class="list"><div class="empty">No purchases in this bucket yet this month.</div></div>') +
+      '<div class="actions"><button type="button" class="btn tinted" data-act="edit-budget" data-id="' + id + '">Edit bucket, stores and categories</button></div>';
+    openSheet(b.name, body, { focus: false });
+  }
+  function txnSheet(txnId) {
+    var t = txnById[txnId]; if (!t) return;
+    var r = bucketFor(t), payee = payeeText(t), k = esc(txnId);
+    var opt = function (val, label, sub) {
+      var on = val ? r && r.id === val : !r;
+      return '<button type="button" class="row plain" data-act="assign" data-txn="' + k + '" data-b="' + esc(val) + '"><span class="row-main"><span class="row-title" style="display:block">' + label + '</span>' + (sub ? '<span class="sub muted" style="display:block">' + sub + '</span>' : '') + '</span>' + (on ? '<span style="color:var(--accent);font-weight:600">✓</span>' : '') + '</button>';
+    };
+    var body = '<div class="card"><div class="card-top"><div><div class="headline">' + esc(t.merchant_name || t.name) + '</div><div class="sub muted">' + fmtDay(t.date) + ' · ' + esc(t.account_name || '') + '</div>' +
+      (CAT_LABEL[t.category] ? '<div class="sub muted">Plaid label: ' + CAT_LABEL[t.category] + '</div>' : '') + '</div><div class="title num">' + money(t.amount) + '</div></div></div>' +
+      '<div class="section"><div class="section-label">Put it in</div><div class="list" role="list">' + state.budget.map(function (b) { return opt(b.id, esc(b.name)); }).join('') +
+      opt('none', 'Not budget spending', 'Leave it out of every bucket') + opt('', 'Not sorted', '') + '</div></div>' +
+      (payee ? '<div class="list"><div class="field"><label for="t-remember">Always put ' + esc(payee) + ' here</label><input id="t-remember" type="checkbox" checked></div></div>' : '') +
+      (state.budget.length ? '' : '<div class="section-foot">Add buckets on the Budget screen first.</div>');
+    openSheet('Purchase', body, { focus: false });
+  }
   function billsView() {
+    if (billsMode === 'budget') return budgetView();
     var bills = state.bills.slice().sort(function (a, b) { return a.dueDay - b.dueDay; });
     var total = bills.reduce(function (s, b) { return s + (+b.amount || 0); }, 0);
     var anyVar = bills.some(function (b) { return b.variable; });
-    var h = '<div class="head"><h1 class="large-title">Bills</h1><div class="sub muted">' + (anyVar ? 'About ' : '') + money(total) + ' a month across ' + bills.length + (bills.length === 1 ? ' bill' : ' bills') + '</div></div>' + banners();
+    var h = '<div class="head"><h1 class="large-title">Bills</h1><div class="sub muted">' + (anyVar ? 'About ' : '') + money(total) + ' a month across ' + bills.length + (bills.length === 1 ? ' bill' : ' bills') + '</div></div>' + banners() + modeSwitch();
     if (bills.length || state.debts.length) h += monthSection();
     if (bills.length) h += '<div class="section-label" style="margin-bottom:-16px">Your bills</div>';
     var rowFor = function (b) {
@@ -811,13 +905,7 @@ button.row:active { background: var(--surface-2); }
     }
     h += '<div class="section-foot">Each bill goes on the last paycheck before it\'s due. Debt minimums are set on the Debt tab.</div>';
     h += '<button class="btn filled block" data-act="add-bill">Add bill</button>';
-    var ppm = PER_MONTH[state.settings.frequency] || 1;
-    h += '<div class="section"><div class="section-label" style="display:flex;justify-content:space-between"><span>Monthly budget</span><span class="num">' + money(budgetMonthly()) + '</span></div>' +
-      (state.budget.length ? '<div class="list" role="list">' + state.budget.map(function (b) {
-        return '<button class="row plain" data-act="edit-budget" data-id="' + b.id + '"><span class="row-main"><span class="row-title" style="display:block">' + esc(b.name) + '</span><span class="sub muted" style="display:block">' + money((+b.amount || 0) / ppm) + ' a paycheck' + (b.account ? ' · ' + esc(b.account) : '') + '</span></span><span class="row-amount">' + money(+b.amount) + '</span>' + I.chev + '</button>';
-      }).join('') + '</div>' : '<div class="list"><div class="empty">Groceries, gas, eating out: spending with no due date.</div></div>') +
-      '<div class="section-foot">No due date. Payday splits these evenly across your paychecks' + (budgetPerCheck() ? ', ' + money(budgetPerCheck()) + ' from each' : '') + '.</div></div>';
-    h += '<button class="btn tinted block" data-act="add-budget">Add budget item</button>';
+    h += '<div class="section-foot">Groceries, gas and other spending with no due date go on the Budget screen above.</div>';
     return h;
   }
   var monthOffset = 0;
@@ -1139,13 +1227,20 @@ button.row:active { background: var(--surface-2); }
     var body = '<div class="list">' +
       '<div class="field"><label for="g-name">Name</label><input id="g-name" name="name" placeholder="Groceries" value="' + esc(b.name) + '" required maxlength="60"></div>' +
       '<div class="field"><label for="g-amount">Per month</label><input id="g-amount" name="amount" inputmode="decimal" placeholder="$0.00" value="' + (b.amount !== '' ? money(+b.amount) : '') + '" required></div>' +
-      accountField('g-acct', b.account, 'Spent from', payAccount() || 'Optional') + '</div>' +
-      '<div class="section-foot">For spending with no due date, like groceries, gas or eating out. Payday splits it evenly across your paychecks.</div>' +
+      accountField('g-acct', b.account, 'Spent from', payAccount() || 'Optional') +
+      '<div class="field"><label for="g-match">Stores</label><input id="g-match" name="match" placeholder="Harris Teeter, Whole Foods" value="' + esc(b.match || '') + '" maxlength="200"></div></div>' +
+      '<div class="section-foot">For spending with no due date, like groceries, gas or eating out. Payday splits it evenly across your paychecks. Purchases at these stores land here automatically. Separate them with commas.</div>' +
+      '<div class="section"><div class="section-label">Also add purchases Plaid labels as</div><div class="list">' + Object.keys(CAT_LABEL).map(function (k) {
+        var other = state.budget.find(function (x) { return x.id !== id && (x.cats || []).indexOf(k) >= 0; });
+        return '<div class="field"><label for="g-c-' + k + '">' + CAT_LABEL[k] + (other ? ' <span class="muted">(' + esc(other.name) + ')</span>' : '') + '</label><input id="g-c-' + k + '" type="checkbox" name="cats" value="' + k + '"' + ((b.cats || []).indexOf(k) >= 0 ? ' checked' : '') + '></div>';
+      }).join('') + '</div><div class="section-foot">Plaid\'s labels are broad: groceries and restaurants are both "Food and drink". Store names win over labels, and you can move any purchase by tapping it.</div></div>' +
       (id ? '<button type="button" class="btn danger" data-act="del-budget" data-id="' + id + '">Delete budget item</button>' : '');
     openSheet(id ? 'Edit budget item' : 'New budget item', body, { saveLabel: 'Save', onSave: function (fd) {
       var amt = num(fd.get('amount')), name = String(fd.get('name') || '').trim();
       if (!name || !(amt >= 0)) { toast('Add a name and a monthly amount.'); return false; }
-      var v = { name: name, amount: Math.round(amt * 100) / 100, account: String(fd.get('account') || '').trim() };
+      var v = { name: name, amount: Math.round(amt * 100) / 100, account: String(fd.get('account') || '').trim(), match: String(fd.get('match') || '').trim(), cats: fd.getAll('cats').map(String) };
+      // A category belongs to one bucket at a time.
+      state.budget.forEach(function (x) { if (x.id !== id && x.cats) x.cats = x.cats.filter(function (c) { return v.cats.indexOf(c) < 0; }); });
       var cur = id && state.budget.find(function (x) { return x.id === id; });
       if (cur) Object.assign(cur, v); else state.budget.push(Object.assign({ id: uid() }, v));
       render(); save(id ? 'Budget updated' : 'Budget item added');
@@ -1312,7 +1407,22 @@ button.row:active { background: var(--surface-2); }
     if (a === 'del-bill') { var id = t.dataset.id; state.bills = state.bills.filter(function (b) { return b.id !== id; }); closeSheet(); render(); save('Bill deleted'); return; }
     if (a === 'add-budget') { budgetSheet(null); return; }
     if (a === 'edit-budget') { budgetSheet(t.dataset.id); return; }
-    if (a === 'del-budget') { var gi = t.dataset.id; state.budget = state.budget.filter(function (b) { return b.id !== gi; }); closeSheet(); render(); save('Budget item deleted'); return; }
+    if (a === 'del-budget') { var gi = t.dataset.id; state.budget = state.budget.filter(function (b) { return b.id !== gi; }); Object.keys(state.txnBudget).forEach(function (k) { if (state.txnBudget[k] === gi) delete state.txnBudget[k]; }); closeSheet(); render(); save('Budget item deleted'); return; }
+    if (a === 'bills-mode') { billsMode = t.dataset.v; render(); window.scrollTo(0, 0); return; }
+    if (a === 'txn') { txnSheet(t.dataset.txn); return; }
+    if (a === 'bucket') { bucketSheet(t.dataset.id); return; }
+    if (a === 'assign') {
+      var tx2 = txnById[t.dataset.txn], to = t.dataset.b; if (!tx2) return;
+      if (!to) delete state.txnBudget[tx2.transaction_id]; else state.txnBudget[tx2.transaction_id] = to;
+      var rem = document.getElementById('t-remember'), bk = state.budget.find(function (b) { return b.id === to; }), payee2 = payeeText(tx2), msg2 = to === 'none' ? 'Not counted as budget spending' : to ? 'Moved to ' + (bk ? bk.name : 'bucket') : 'Back to unsorted';
+      if (rem && rem.checked && bk && payee2 && !textHit(bk.match, tx2)) {
+        bk.match = bk.match ? bk.match + ', ' + payee2 : payee2;
+        state.budget.forEach(function (x) { if (x !== bk && x.match) x.match = x.match.split(',').map(function (m) { return m.trim(); }).filter(function (m) { return m.toLowerCase() !== payee2.toLowerCase(); }).join(', '); });
+        delete state.txnBudget[tx2.transaction_id];
+        msg2 += '. ' + payee2 + ' purchases will go here from now on';
+      }
+      closeSheet(); render(); save(msg2); return;
+    }
     if (a === 'add-debt') { debtSheet(null); return; }
     if (a === 'edit-debt') { debtSheet(t.dataset.id); return; }
     if (a === 'del-debt') { var di = t.dataset.id; state.debts = state.debts.filter(function (b) { return b.id !== di; }); closeSheet(); render(); save('Debt deleted'); return; }

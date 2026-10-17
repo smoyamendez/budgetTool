@@ -237,6 +237,15 @@ export async function syncAll(env: Env): Promise<SyncResult> {
         changed = true;
       }
     }
+    // Purchases you sorted into a budget bucket keep their bucket when they post.
+    const buckets = (budget?.txnBudget || {}) as Record<string, string>;
+    for (const [from, to] of relink) {
+      if (buckets[from] && !buckets[to]) {
+        buckets[to] = buckets[from];
+        delete buckets[from];
+        changed = true;
+      }
+    }
     if (changed && budget) await putBudget(env, budget);
   }
   return result;
