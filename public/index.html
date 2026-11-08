@@ -682,6 +682,11 @@ button.row:active { background: var(--surface-2); }
     plansOn().forEach(function (p) { if (p.type === 'pay' && p.date <= date && p.date >= from) { amt = +p.amount || 0; from = p.date; } });
     return amt;
   }
+  // Planned money counts as arrived once a deposit of about that amount lands within 5 days of its date.
+  function planArrived(p) {
+    var amt = +p.amount || 0;
+    return txns.some(function (t) { return t.amount < 0 && Math.abs(-t.amount - amt) <= Math.max(1, amt * 0.01) && Math.abs(daysBetween(p.date, t.date)) <= 5; });
+  }
   function planStart(p) { return p.start || p.created || TODAY; }
   // A savings goal is split evenly across the paychecks from its start until the day before it's needed.
   function goalChecks(p) { return Math.max(1, paydays(state.settings, planStart(p), addDays(p.date, -1)).length); }
@@ -763,14 +768,24 @@ button.row:active { background: var(--surface-2); }
         if (c.reality) { c.realLimited = c.reality.free < avail; avail = Math.max(0, Math.min(avail, Math.floor(c.reality.free))); }
       }
       // Pay the first debt in line; if that clears it, the rest goes to the next one.
-      while (avail > 0.004) {
-        var next = debtOrder(state.debts.filter(function (d) { return bal[d.id] > 0.004; }).map(function (d) { return Object.assign({}, d, { balance: bal[d.id] }); }), S.strategy)[0];
-        if (!next) break;
-        var pay = Math.round(Math.min(avail, bal[next.id]) * 100) / 100;
-        c.parts.push({ debt: Object.assign({}, debtById(next.id), { balance: bal[next.id] }), amount: pay });
-        bal[next.id] -= pay; avail -= pay;
-      }
+      var alloc = function (amt, into) {
+        while (amt > 0.004) {
+          var next = debtOrder(state.debts.filter(function (d) { return bal[d.id] > 0.004; }).map(function (d) { return Object.assign({}, d, { balance: bal[d.id] }); }), S.strategy)[0];
+          if (!next) break;
+          var pay = Math.round(Math.min(amt, bal[next.id]) * 100) / 100;
+          into.push({ debt: Object.assign({}, debtById(next.id), { balance: bal[next.id] }), amount: pay });
+          bal[next.id] -= pay; amt -= pay;
+        }
+      };
+      alloc(avail, c.parts);
       c.suggested = c.parts.reduce(function (s, x) { return s + x.amount; }, 0);
+      // Planned money that hasn't reached checking yet still has a job: what it will pay once it lands.
+      c.pendingIn = (c.planIn || []).filter(function (p) { return p.use !== 'save' && !planArrived(p); });
+      c.pendingParts = [];
+      if (i === cur && c.pendingIn.length && c.reality) {
+        var waiting = c.pendingIn.reduce(function (s, p) { return s + (+p.amount || 0); }, 0);
+        alloc(Math.min(waiting, Math.max(0, c.spendable - (+S.buffer || 0)) - c.suggested), c.pendingParts);
+      }
     });
     return { pays: pays, cur: cur, checks: checks, target: target, order: order };
   }
@@ -778,7 +793,7 @@ button.row:active { background: var(--surface-2); }
   // Undated monthly spending is split evenly across paychecks: a $600 grocery budget is about $277 from each biweekly check.
   function budgetPerCheck() { return Math.round(budgetMonthly() / (PER_MONTH[state.settings.frequency] || 1) * 100) / 100; }
   function projection(withPlans) {
-    var S = state.settings, ppm = PER_MONTH[S.frequency] || 1, plans = withPlans === false ? [] : plansOn();
+    var S = state.settings, ppm = PER_MONTH[S.frequency] || 1, plans = withPlans === false ? [] : Array.isArray(withPlans) ? withPlans : plansOn();
     var billsM = state.bills.reduce(function (s, b) { return s + monthlyCost(b); }, 0) + budgetMonthly();
     var live = state.debts.filter(function (d) { return d.balance > 0.004; });
     var minsM = live.reduce(function (s, d) { return s + Math.min(+d.minimum || 0, d.balance); }, 0);
@@ -1001,18 +1016,19 @@ button.row:active { background: var(--surface-2); }
       row('Money in since then', '+' + money(R.inn)) +
       row('Money out since then', '&minus;' + money(R.out)) +
       row('In checking now', money(R.now), 'total') + '</div>' +
+      ((c.pendingIn || []).length ? '<div class="sub" style="color:var(--accent)">Not counted yet: ' + c.pendingIn.map(function (p) { return esc(p.name) + ' ' + money(+p.amount || 0); }).join(', ') + '. It\'s added once it shows up in checking.</div>' : '') +
       '<div class="sub muted">' + (R.free < -0.004 ? 'More went out than the plan expected. ' : '') + 'The list at the bottom, What came out, shows every transaction since ' + fmtShort(c.date) + '. Budget spent this paycheck: ' + money(R.spent) + ' of ' + money(c.budget) + '.</div></section>';
   }
   function ledger(c, M, planOnly) {
     var bills = 0, mins = 0, buf = +state.settings.buffer || 0;
     c.items.forEach(function (it) { if (it.kind === 'debt') mins += it.amount; else bills += it.amount; });
     var extraRows = c.extraDone ? extraParts(c.extraDone).map(function (x) { return { name: (debtById(x.debtId) || {}).name, amount: x.amount }; })
-      : (c.parts || []).map(function (x) { return { name: x.debt.name, amount: x.amount }; });
-    var left = c.spendable - buf - (c.extraDone ? 0 : c.suggested);
+      : (c.parts || []).concat(c.pendingParts || []).map(function (x) { return { name: x.debt.name, amount: x.amount }; });
+    var left = c.spendable - buf - (c.extraDone ? 0 : c.suggested + (c.pendingParts || []).reduce(function (s, x) { return s + x.amount; }, 0));
     var row = function (l, v, cls) { return '<div' + (cls ? ' class="' + cls + '"' : '') + '><span>' + l + '</span><span>' + v + '</span></div>'; };
     var out = function (v) { return '&minus;' + money(v); };
     var h = row('Paycheck', money(c.amount));
-    (c.planIn || []).forEach(function (p) { if (p.use !== 'save') h += row(esc(p.name) + ' (' + fmtShort(p.date) + ')', '+' + money(+p.amount || 0)); });
+    (c.planIn || []).forEach(function (p) { if (p.use !== 'save') h += row(esc(p.name) + ' (' + fmtShort(p.date) + (c.index === M.cur && !planArrived(p) ? ', not in yet' : '') + ')', '+' + money(+p.amount || 0)); });
     if (bills > 0.004) h += row('Bills', out(bills));
     if (mins > 0.004) h += row('Card minimums', out(mins));
     if (c.budget > 0.004) h += row('Monthly budget', out(c.budget));
@@ -1020,7 +1036,9 @@ button.row:active { background: var(--surface-2); }
     if (c.reserve > 0.004) h += row('Save for ' + fmtShort(c.reserveFor) + ' paycheck', out(c.reserve));
     if (buf > 0.004) h += row('Spending money', out(buf));
     (c.goals || []).forEach(function (g) { h += row('Save for ' + esc(g.plan.name), out(g.share)); });
-    extraRows.forEach(function (x) { if (x.amount > 0.004) h += row('Extra to ' + esc(x.name || 'debt'), out(x.amount)); });
+    var merged = [];
+    extraRows.forEach(function (x) { var m = merged.find(function (y) { return y.name === x.name; }); if (m) m.amount += x.amount; else merged.push({ name: x.name, amount: x.amount }); });
+    merged.forEach(function (x) { if (x.amount > 0.004) h += row('Extra to ' + esc(x.name || 'debt'), out(x.amount)); });
     h += row(left < -0.004 ? 'Short' : 'Left over', money(left), 'total' + (left < -0.004 ? ' short' : ''));
     var kept = (c.planIn || []).filter(function (p) { return p.use === 'save'; });
     return '<section class="card"><div class="headline">' + (planOnly ? 'The plan for this paycheck' : 'Where this paycheck goes') + '</div><div class="ledger">' + h + '</div>' +
@@ -1134,12 +1152,14 @@ button.row:active { background: var(--surface-2); }
         '<button class="btn tinted" data-act="undo-extra" data-date="' + c.date + '">Undo</button></section>';
     }
     if (!c.target) return state.debts.length ? '<section class="card"><div class="headline">No debt left</div><div class="sub muted">Every balance is at zero. What\'s left is yours.</div></section>' : '';
-    if (c.suggested < 1 && c.realLimited) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Not right now. What\'s in checking has to cover the bills and savings above first. Minimums still keep you on track.</div></section>';
+    var pend = c.pendingParts && c.pendingParts.length ? '<div class="sub" style="color:var(--accent)">When ' + c.pendingIn.map(function (p) { return esc(p.name) + ' (' + money(+p.amount || 0) + ')'; }).join(' and ') + (c.pendingIn.length === 1 ? ' arrives' : ' arrive') + ', put ' +
+      c.pendingParts.map(function (x) { return money(x.amount) + ' toward ' + esc(x.debt.name) + (x.amount >= x.debt.balance - 0.004 ? ', paying it off' : ''); }).join(', then ') + '.</div>' : '';
+    if (c.suggested < 1 && c.realLimited) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Not right now. What\'s in checking has to cover the bills and savings above first. Minimums still keep you on track.</div>' + pend + '</section>';
     if (c.suggested < 1) return '<section class="card"><div class="headline">Extra toward debt</div><div class="sub muted">Nothing extra this paycheck after bills and your ' + money(+state.settings.buffer || 0) + ' spending money. Minimums still keep you on track.</div></section>';
     var plan = c.parts.map(function (x, k) {
       return money(x.amount) + ' toward ' + esc(x.debt.name) + (x.debt.apr ? ' (' + x.debt.apr + '% APR)' : '') + (x.amount >= x.debt.balance - 0.004 ? ', paying it off' : k === 0 && c.index > M.cur ? ', ' + money(x.debt.balance) + ' left on it by then' : '');
     }).join(', then ');
-    return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + plan + '.' + (c.realLimited ? ' That\'s what your checking balance can spare right now.' : '') + ' You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div></div>' + badge('debt', 'Pay first') + '</div>' +
+    return '<section class="card"><div class="card-top"><div><div class="headline">Extra toward debt</div><div class="sub muted">Put ' + plan + '.' + (c.realLimited ? ' That\'s what your checking balance can spare right now.' : '') + ' You still keep ' + money(+state.settings.buffer || 0) + ' for everyday spending.</div>' + pend + '</div>' + badge('debt', 'Pay first') + '</div>' +
       '<button class="btn filled" data-act="do-extra" data-date="' + c.date + '">Mark ' + money(c.suggested) + ' paid</button></section>';
   }
   var billsMode = 'bills';
@@ -1307,10 +1327,12 @@ button.row:active { background: var(--surface-2); }
     var S = state.settings, order = debtOrder(state.debts, S.strategy), P = projection(), P0 = plansOn().length ? projection(false) : null;
     var total = state.debts.reduce(function (s, d) { return s + Math.max(0, +d.balance); }, 0);
     var h = '<div class="head"><h1 class="large-title">Debt</h1><div class="sub muted">' + money(total) + ' left across ' + state.debts.filter(function (d) { return d.balance > 0.004; }).length + ' balances</div></div>' + banners();
+    var gain = P0 && P0.months != null && P.months != null ? P0.months - P.months : 0;
     if (state.debts.length) {
-      h += '<section class="card hero"><div class="foot muted">Debt-free by</div><div class="amount-hero" style="font-size:40px;line-height:46px">' + (total < 0.01 ? 'Done' : P.months == null ? 'Not yet' : monthLabel(P.months)) + '</div>' +
-        '<div class="sub muted">' + (P.months == null && total >= 0.01 ? 'At this pace the balances keep growing. Lower the spending amount in Settings or add income to free up extra.' : 'Paying minimums plus about ' + money(P.extraM) + ' extra a month, based on your usual paycheck, bills, monthly budget and spending money.' + (P0 && P0.months !== P.months ? ' With your plans below. Without them: ' + (P0.months == null ? 'not yet' : monthLabel(P0.months)) + '.' : '') + '') + '</div></section>';
-      h += '<div class="section"><div class="section-label">Pay off first</div><div class="seg" role="tablist" aria-label="Payoff order">' +
+      h += '<section class="card hero"><div class="foot muted">' + (P0 ? 'With your plans, debt-free by' : 'Debt-free by') + '</div><div class="amount-hero" style="font-size:40px;line-height:46px">' + (total < 0.01 ? 'Done' : P.months == null ? 'Not yet' : monthLabel(P.months)) + '</div>' +
+        '<div class="sub muted">' + (P.months == null && total >= 0.01 ? 'At this pace the balances keep growing. Lower the spending amount in Settings or add income to free up extra.' : 'Paying minimums plus about ' + money(P.extraM) + ' extra a month, based on your usual paycheck, bills, monthly budget and spending money.' + (P0 && P0.months !== P.months ? '' : '') + '') + '</div></section>';
+      if (state.debts.length && P0 && P0.months !== P.months) h += '<div class="banner"><p>' + (gain > 0 ? 'Your plans make you debt-free <strong>' + gain + (gain === 1 ? ' month' : ' months') + ' sooner</strong>.' : gain < 0 ? 'Your plans push your debt-free date back ' + (-gain) + (gain === -1 ? ' month' : ' months') + '.' : 'Your plans change your payoff.') + ' Without them: ' + (P0.months == null ? 'not yet' : monthLabel(P0.months)) + '.</p></div>';
+    h += '<div class="section"><div class="section-label">Pay off first</div><div class="seg" role="tablist" aria-label="Payoff order">' +
         '<button role="tab" data-act="strategy" data-v="avalanche" aria-selected="' + (S.strategy !== 'snowball') + '" class="' + (S.strategy !== 'snowball' ? 'on' : '') + '">Highest interest</button>' +
         '<button role="tab" data-act="strategy" data-v="snowball" aria-selected="' + (S.strategy === 'snowball') + '" class="' + (S.strategy === 'snowball' ? 'on' : '') + '">Smallest balance</button></div>' +
         '<div class="section-foot">' + (S.strategy === 'snowball' ? 'Clears small balances fast for quick wins.' : 'Saves the most on interest.') + '</div></div>';
@@ -1331,8 +1353,18 @@ button.row:active { background: var(--surface-2); }
     h += plansSection(P, P0);
     return h;
   }
+  // How one plan moves the debt-free date: compared with leaving it out (if on) or adding it (if off).
+  function planEffect(p, P) {
+    if (!state.debts.some(function (d) { return d.balance > 0.004; })) return '';
+    var on = p.on !== false, others = plansOn().filter(function (x) { return x.id !== p.id; });
+    var a = on ? P : projection(others.concat([p])), b = on ? projection(others) : P;
+    if (a.months == null || b.months == null) return '';
+    var n = b.months - a.months;
+    var txt = n > 0 ? n + (n === 1 ? ' month' : ' months') + ' sooner' : n < 0 ? (-n) + (n === -1 ? ' month' : ' months') + ' later' : 'no change to your debt-free date';
+    return (on ? '' : 'Would be ') + (n === 0 ? txt : 'Debt-free ' + txt);
+  }
   function planLine(p) {
-    if (p.type === 'in') return money(+p.amount || 0) + ' coming ' + fmtShort(p.date) + ' · ' + (p.use === 'save' ? 'kept in savings' : 'toward debt');
+    if (p.type === 'in') return money(+p.amount || 0) + (planArrived(p) ? ' arrived ' : ' coming ') + fmtShort(p.date) + ' · ' + (p.use === 'save' ? 'kept in savings' : 'toward debt');
     if (p.type === 'save') return 'Save ' + money(+p.amount || 0) + ' by ' + fmtShort(p.date) + ' · ' + money(goalShare(p)) + ' a paycheck';
     return 'Paycheck becomes ' + money(+p.amount || 0) + ' from ' + fmtShort(p.date);
   }
@@ -1341,7 +1373,8 @@ button.row:active { background: var(--surface-2); }
     if (state.plans.length) {
       h += '<div class="list" role="list">' + state.plans.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; }).map(function (p) {
         var on = p.on !== false, past = p.type !== 'pay' && p.date < TODAY;
-        return '<div class="row"><button type="button" class="row-main plain" data-act="edit-plan" data-id="' + p.id + '" style="border:0;background:none;text-align:left;padding:0;color:inherit"><span class="row-title" style="display:block' + (on ? '' : ';opacity:.5') + '">' + esc(p.name) + (past ? ' <span class="muted">(past)</span>' : '') + '</span><span class="sub muted" style="display:block">' + planLine(p) + '</span></button>' +
+        var eff = planEffect(p, P);
+        return '<div class="row"><button type="button" class="row-main plain" data-act="edit-plan" data-id="' + p.id + '" style="border:0;background:none;text-align:left;padding:0;color:inherit"><span class="row-title" style="display:block' + (on ? '' : ';opacity:.5') + '">' + esc(p.name) + (past ? ' <span class="muted">(past)</span>' : '') + '</span><span class="sub muted" style="display:block">' + planLine(p) + '</span>' + (eff ? '<span class="sub" style="display:block;color:' + (eff.indexOf('sooner') >= 0 ? 'var(--paid)' : 'var(--ink-muted)') + '">' + eff + '</span>' : '') + '</button>' +
           '<input type="checkbox" aria-label="Include ' + esc(p.name) + '" data-act="plan-toggle" data-id="' + p.id + '"' + (on ? ' checked' : '') + '></div>';
       }).join('') + '</div>';
     } else h += '<div class="list"><div class="empty">Add things you know are coming: a bonus or tax refund, something to save up for, or a raise.</div></div>';
